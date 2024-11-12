@@ -66,6 +66,7 @@ public class Metric {
 	private Boolean isTransient;
 
 	@JsonProperty("metaData")
+	@JsonInclude(Include.NON_EMPTY)
 	private MetaData metaData;
 
 	@JsonProperty("properties")
@@ -73,7 +74,7 @@ public class Metric {
 	private PropertySet properties;
 
 	@JsonProperty("value")
-	@JsonInclude(Include.NON_EMPTY)
+	@JsonInclude(Include.ALWAYS)
 	private Object value;
 
 	private Boolean isNull = null;

@@ -85,13 +85,13 @@ public class TahuClient implements MqttCallbackExtended {
 	/*
 	 * Other standard MQTT parameters.
 	 */
-	private MqttServerUrl mqttServerUrl;
-	private MqttServerName mqttServerName;
+	private final MqttServerUrl mqttServerUrl;
+	private final MqttServerName mqttServerName;
 	private final MqttClientId clientId;
 	private String username;
 	private String password;
-	private boolean cleanSession;
-	private int keepAlive;
+	private final boolean cleanSession;
+	private final int keepAlive;
 
 	/*
 	 * The callback client
