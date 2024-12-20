@@ -144,15 +144,16 @@ public class SparkplugBPayloadDecoder implements PayloadDecoder<SparkplugBPayloa
 						.createMetric();
 	}
 
-	protected Map<String, PropertyValue> convertProperties(SparkplugBProto.Payload.PropertySet decodedPropSet)
-			throws SparkplugInvalidTypeException, Exception {
-		Map<String, PropertyValue> map = new HashMap<String, PropertyValue>();
+	protected Map<String, PropertyValue<? extends PropertyDataType>> convertProperties(
+			SparkplugBProto.Payload.PropertySet decodedPropSet) throws SparkplugInvalidTypeException, Exception {
+		Map<String, PropertyValue<? extends PropertyDataType>> map =
+				new HashMap<String, PropertyValue<? extends PropertyDataType>>();
 		List<String> keys = decodedPropSet.getKeysList();
 		List<SparkplugBProto.Payload.PropertyValue> values = decodedPropSet.getValuesList();
 		for (int i = 0; i < keys.size(); i++) {
 			SparkplugBProto.Payload.PropertyValue value = values.get(i);
 			map.put(keys.get(i),
-					new PropertyValue(PropertyDataType.fromInteger(value.getType()), getPropertyValue(value)));
+					new PropertyValue<>(PropertyDataType.fromInteger(value.getType()), getPropertyValue(value)));
 		}
 		return map;
 	}
