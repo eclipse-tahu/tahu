@@ -58,6 +58,14 @@
         <configuration>
           <skipNexusStagingDeployMojo>true</skipNexusStagingDeployMojo>
         </configuration>
+        <!-- https://stackoverflow.com/questions/70153962/nexus-staging-maven-plugin-maven-deploy-failed-an-api-incompatibility-was-enco -->
+        <dependencies>
+          <dependency>
+            <groupId>com.thoughtworks.xstream</groupId>
+            <artifactId>xstream</artifactId>
+            <version>1.4.15</version> <!-- apparently this needs to be exactly this version -->
+          </dependency>
+        </dependencies>
       </plugin>
 
       <!-- New Build mechanism - replaces maven-assembly-plugin -->
