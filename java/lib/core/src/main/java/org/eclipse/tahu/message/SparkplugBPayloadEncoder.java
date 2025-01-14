@@ -183,7 +183,7 @@ public class SparkplugBPayloadEncoder implements PayloadEncoder<SparkplugBPayloa
 	private SparkplugBProto.Payload.PropertySet.Builder convertPropertySet(PropertySet propertySet) throws Exception {
 		SparkplugBProto.Payload.PropertySet.Builder setBuilder = SparkplugBProto.Payload.PropertySet.newBuilder();
 
-		Map<String, PropertyValue> map = propertySet.getPropertyMap();
+		Map<String, PropertyValue<? extends PropertyDataType>> map = propertySet.getPropertyMap();
 		for (String key : map.keySet()) {
 			setBuilder.addKeys(key);
 			setBuilder.addValues(convertProperty(map, key));
@@ -191,10 +191,10 @@ public class SparkplugBPayloadEncoder implements PayloadEncoder<SparkplugBPayloa
 		return setBuilder;
 	}
 
-	protected SparkplugBProto.Payload.PropertyValue.Builder convertProperty(Map<String, PropertyValue> map, String key)
-			throws Exception {
+	protected SparkplugBProto.Payload.PropertyValue.Builder convertProperty(
+			Map<String, PropertyValue<? extends PropertyDataType>> map, String key) throws Exception {
 		SparkplugBProto.Payload.PropertyValue.Builder builder = SparkplugBProto.Payload.PropertyValue.newBuilder();
-		PropertyValue value = map.get(key);
+		PropertyValue<? extends PropertyDataType> value = map.get(key);
 		PropertyDataType type = value.getType();
 		builder.setType(type.toIntValue());
 		if (value.getValue() == null) {

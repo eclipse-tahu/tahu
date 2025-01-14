@@ -27,11 +27,11 @@ import com.fasterxml.jackson.annotation.JsonIgnore;
 /**
  * The value of a property in a {@link PropertySet}.
  */
-public class PropertyValue {
+public class PropertyValue<T extends PropertyDataType> {
 
 	private static Logger logger = LoggerFactory.getLogger(PropertyValue.class.getName());
 
-	private PropertyDataType type;
+	private T type;
 	private Object value;
 	private Boolean isNull = null;
 
@@ -48,15 +48,15 @@ public class PropertyValue {
 	 * @param value the property value
 	 * @throws SparkplugInvalidTypeException
 	 */
-	public PropertyValue(PropertyDataType type, Object value) throws SparkplugInvalidTypeException {
+	public PropertyValue(T type, Object value) throws SparkplugInvalidTypeException {
 		this.type = type;
 		this.value = value;
 		isNull = (value == null) ? true : false;
 		type.checkType(value);
 	}
 
-	public PropertyValue(PropertyValue propertyValue) throws Exception {
-		this.type = new PropertyDataType(propertyValue.getType());
+	public PropertyValue(PropertyValue<T> propertyValue) throws Exception {
+		this.type = propertyValue.getType();
 		this.isNull = propertyValue.isNull();
 
 		if (!isNull) {
@@ -87,7 +87,7 @@ public class PropertyValue {
 	 *
 	 * @return the {@link PropertyDataType} of the {@link PropertyValue}
 	 */
-	public PropertyDataType getType() {
+	public T getType() {
 		return type;
 	}
 
@@ -96,7 +96,7 @@ public class PropertyValue {
 	 *
 	 * @param type the {@link PropertyDataType} of this {@link PropertyValue}
 	 */
-	public void setType(PropertyDataType type) {
+	public void setType(T type) {
 		this.type = type;
 	}
 
@@ -137,7 +137,8 @@ public class PropertyValue {
 		if (object == null || this.getClass() != object.getClass()) {
 			return false;
 		}
-		PropertyValue propValue = (PropertyValue) object;
+		@SuppressWarnings("unchecked")
+		PropertyValue<T> propValue = (PropertyValue<T>) object;
 		return Objects.equals(type, propValue.getType()) && Objects.equals(value, propValue.getValue());
 	}
 
