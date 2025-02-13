@@ -537,38 +537,40 @@ void print_propertyvalue(const char *prefix, org_eclipse_tahu_protobuf_Payload_P
     if (value->has_is_null) {
         PP("%sis_null=%u\n", prefix, value->is_null);
     }
-    switch (value->which_value) {
-    case org_eclipse_tahu_protobuf_Payload_PropertyValue_int_value_tag:
-        PP("%sint_value=%"PRId32"\n", prefix, value->value.int_value);
-        break;
-    case org_eclipse_tahu_protobuf_Payload_PropertyValue_long_value_tag:
-        PP("%slong_value=%"PRId64"\n", prefix, value->value.long_value);
-        break;
-    case org_eclipse_tahu_protobuf_Payload_PropertyValue_float_value_tag:
-        PP("%sfloat_value=%f\n", prefix, value->value.float_value);
-        break;
-    case org_eclipse_tahu_protobuf_Payload_PropertyValue_double_value_tag:
-        PP("%sdouble_value=%f\n", prefix, value->value.double_value);
-        break;
-    case org_eclipse_tahu_protobuf_Payload_PropertyValue_boolean_value_tag:
-        PP("%sboolean_value=%u\n", prefix, value->value.boolean_value);
-        break;
-    case org_eclipse_tahu_protobuf_Payload_PropertyValue_string_value_tag:
-        PP("%sstring_value=%s [%p]\n", prefix, value->value.string_value, value->value.string_value);
-        break;
-    case org_eclipse_tahu_protobuf_Payload_PropertyValue_propertyset_value_tag:
-        snprintf(temp, sizeof(temp), "%spropertyset.", prefix);
-        print_propertyset(temp, &value->value.propertyset_value);
-        break;
-    case org_eclipse_tahu_protobuf_Payload_PropertyValue_propertysets_value_tag:
-        snprintf(temp, sizeof(temp), "%spropertysets.", prefix);
-        print_propertysetlist(temp, &value->value.propertysets_value);
-        break;
-    case org_eclipse_tahu_protobuf_Payload_PropertyValue_extension_value_tag:
-        PP("%sextension_value=[%p] (display not supported)\n", prefix, value->value.extension_value.extensions);
-        break;
-    default:
-        PP("%sinvalid which_value=%"PRI_u_PB_SIZE"\n", prefix, value->which_value);
+    if (!value->is_null) {
+      switch (value->which_value) {
+      case org_eclipse_tahu_protobuf_Payload_PropertyValue_int_value_tag:
+	  PP("%sint_value=%"PRId32"\n", prefix, value->value.int_value);
+	  break;
+      case org_eclipse_tahu_protobuf_Payload_PropertyValue_long_value_tag:
+	  PP("%slong_value=%"PRId64"\n", prefix, value->value.long_value);
+	  break;
+      case org_eclipse_tahu_protobuf_Payload_PropertyValue_float_value_tag:
+	  PP("%sfloat_value=%f\n", prefix, value->value.float_value);
+	  break;
+      case org_eclipse_tahu_protobuf_Payload_PropertyValue_double_value_tag:
+	  PP("%sdouble_value=%f\n", prefix, value->value.double_value);
+	  break;
+      case org_eclipse_tahu_protobuf_Payload_PropertyValue_boolean_value_tag:
+	  PP("%sboolean_value=%u\n", prefix, value->value.boolean_value);
+	  break;
+      case org_eclipse_tahu_protobuf_Payload_PropertyValue_string_value_tag:
+	  PP("%sstring_value=%s [%p]\n", prefix, value->value.string_value, value->value.string_value);
+	  break;
+      case org_eclipse_tahu_protobuf_Payload_PropertyValue_propertyset_value_tag:
+	  snprintf(temp, sizeof(temp), "%spropertyset.", prefix);
+	  print_propertyset(temp, &value->value.propertyset_value);
+	  break;
+      case org_eclipse_tahu_protobuf_Payload_PropertyValue_propertysets_value_tag:
+	  snprintf(temp, sizeof(temp), "%spropertysets.", prefix);
+	  print_propertysetlist(temp, &value->value.propertysets_value);
+	  break;
+      case org_eclipse_tahu_protobuf_Payload_PropertyValue_extension_value_tag:
+	  PP("%sextension_value=[%p] (display not supported)\n", prefix, value->value.extension_value.extensions);
+	  break;
+      default:
+	  PP("%sinvalid which_value=%"PRI_u_PB_SIZE"\n", prefix, value->which_value);
+      }
     }
 }
 
@@ -779,42 +781,44 @@ void print_metric(const char *prefix, org_eclipse_tahu_protobuf_Payload_Metric *
         snprintf(temp, sizeof(temp), "%sproperties.", prefix);
         print_propertyset(temp, &metric->properties);
     }
-    switch (metric->which_value) {
-    case org_eclipse_tahu_protobuf_Payload_Metric_int_value_tag:
-        PP("%sint_value=%"PRId32"\n", prefix, metric->value.int_value);
-        break;
-    case org_eclipse_tahu_protobuf_Payload_Metric_long_value_tag:
-        PP("%slong_value=%"PRId64"\n", prefix, metric->value.long_value);
-        break;
-    case org_eclipse_tahu_protobuf_Payload_Metric_float_value_tag:
-        PP("%sfloat_value=%f\n", prefix, metric->value.float_value);
-        break;
-    case org_eclipse_tahu_protobuf_Payload_Metric_double_value_tag:
-        PP("%sdouble_value=%f\n", prefix, metric->value.double_value);
-        break;
-    case org_eclipse_tahu_protobuf_Payload_Metric_boolean_value_tag:
-        PP("%sboolean_value=%d\n", prefix, metric->value.boolean_value);
-        break;
-    case org_eclipse_tahu_protobuf_Payload_Metric_string_value_tag:
-        PP("%sstring_value=%s [%p]\n", prefix, metric->value.string_value, metric->value.string_value);
-        break;
-    case org_eclipse_tahu_protobuf_Payload_Metric_dataset_value_tag:
-        snprintf(temp, sizeof(temp), "%sdataset.", prefix);
-        print_dataset(temp, &metric->value.dataset_value);
-        break;
-    case org_eclipse_tahu_protobuf_Payload_Metric_bytes_value_tag:
-        PP("%sbytes_value=[%p] (display not supported)\n", prefix, metric->value.bytes_value);
-        break;
-    case org_eclipse_tahu_protobuf_Payload_Metric_template_value_tag:
-        snprintf(temp, sizeof(temp), "%stemplate.", prefix);
-        print_template(temp, &metric->value.template_value);
-        break;
-    case org_eclipse_tahu_protobuf_Payload_Metric_extension_value_tag:
-        PP("%sextension_value=[%p] (display not supported)\n", prefix, metric->value.extension_value.extensions);
-        break;
-    default:
-        PP("%sinvalid which_type=%"PRI_u_PB_SIZE"\n", prefix, metric->which_value);
-        break;
+    if (!metric->is_null) {
+      switch (metric->which_value) {
+      case org_eclipse_tahu_protobuf_Payload_Metric_int_value_tag:
+	  PP("%sint_value=%"PRId32"\n", prefix, metric->value.int_value);
+	  break;
+      case org_eclipse_tahu_protobuf_Payload_Metric_long_value_tag:
+	  PP("%slong_value=%"PRId64"\n", prefix, metric->value.long_value);
+	  break;
+      case org_eclipse_tahu_protobuf_Payload_Metric_float_value_tag:
+	  PP("%sfloat_value=%f\n", prefix, metric->value.float_value);
+	  break;
+      case org_eclipse_tahu_protobuf_Payload_Metric_double_value_tag:
+	  PP("%sdouble_value=%f\n", prefix, metric->value.double_value);
+	  break;
+      case org_eclipse_tahu_protobuf_Payload_Metric_boolean_value_tag:
+	  PP("%sboolean_value=%d\n", prefix, metric->value.boolean_value);
+	  break;
+      case org_eclipse_tahu_protobuf_Payload_Metric_string_value_tag:
+	  PP("%sstring_value=%s [%p]\n", prefix, metric->value.string_value, metric->value.string_value);
+	  break;
+      case org_eclipse_tahu_protobuf_Payload_Metric_dataset_value_tag:
+	  snprintf(temp, sizeof(temp), "%sdataset.", prefix);
+	  print_dataset(temp, &metric->value.dataset_value);
+	  break;
+      case org_eclipse_tahu_protobuf_Payload_Metric_bytes_value_tag:
+	  PP("%sbytes_value=[%p] (display not supported)\n", prefix, metric->value.bytes_value);
+	  break;
+      case org_eclipse_tahu_protobuf_Payload_Metric_template_value_tag:
+	  snprintf(temp, sizeof(temp), "%stemplate.", prefix);
+	  print_template(temp, &metric->value.template_value);
+	  break;
+      case org_eclipse_tahu_protobuf_Payload_Metric_extension_value_tag:
+	  PP("%sextension_value=[%p] (display not supported)\n", prefix, metric->value.extension_value.extensions);
+	  break;
+      default:
+	  PP("%sinvalid which_type=%"PRI_u_PB_SIZE"\n", prefix, metric->which_value);
+	  break;
+      }
     }
 }
 
