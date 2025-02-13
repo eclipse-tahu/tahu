@@ -139,7 +139,7 @@ public class SparkplugEdgeNode extends MetricManager {
 				}
 
 				// Check the bdSeq
-				if (birthBdSeqNum != incomingBdSeq) {
+				if (!incomingBdSeq.equals(birthBdSeqNum)) {
 					logger.debug("Mismatched bdSeq number - got {} expected {} - ignoring", incomingBdSeq,
 							birthBdSeqNum);
 					return;
