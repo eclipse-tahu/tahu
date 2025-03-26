@@ -208,15 +208,15 @@ public class SparkplugExample implements MqttCallbackExtended {
 				payload.addMetric(new MetricBuilder("Node Control/Rebirth", Boolean, false).createMetric());
 
 				PropertySet nestedPropertySet = new PropertySetBuilder()
-						.addProperty("custom", new PropertyValue(PropertyDataType.String, "Custom Value"))
+						.addProperty("custom", new PropertyValue<>(PropertyDataType.String, "Custom Value"))
 						.createPropertySet();
 
 				PropertySet propertySet = new PropertySetBuilder()
-						.addProperty("engUnit", new PropertyValue(PropertyDataType.String, "My Units"))
-						.addProperty("engLow", new PropertyValue(PropertyDataType.Double, 1.0))
-						.addProperty("engHigh", new PropertyValue(PropertyDataType.Double, 10.0))
+						.addProperty("engUnit", new PropertyValue<>(PropertyDataType.String, "My Units"))
+						.addProperty("engLow", new PropertyValue<>(PropertyDataType.Double, 1.0))
+						.addProperty("engHigh", new PropertyValue<>(PropertyDataType.Double, 10.0))
 						.addProperty("Custom nested node prop",
-								new PropertyValue(PropertyDataType.PropertySet, nestedPropertySet))
+								new PropertyValue<>(PropertyDataType.PropertySet, nestedPropertySet))
 						/*
 						 * .addProperty("CustA", new PropertyValue(PropertyDataType.String, "Custom A"))
 						 * .addProperty("CustB", new PropertyValue(PropertyDataType.Double, 10.0)) .addProperty("CustC",
@@ -266,15 +266,15 @@ public class SparkplugExample implements MqttCallbackExtended {
 				payload.addMetric(new MetricBuilder("Properties/sw_version", String, SW_VERSION).createMetric());
 
 				PropertySet nestedPropertySet = new PropertySetBuilder()
-						.addProperty("custom", new PropertyValue(PropertyDataType.String, "Custom Value"))
+						.addProperty("custom", new PropertyValue<>(PropertyDataType.String, "Custom Value"))
 						.createPropertySet();
 
 				PropertySet propertySet = new PropertySetBuilder()
-						.addProperty("engUnit", new PropertyValue(PropertyDataType.String, "My Units"))
-						.addProperty("engLow", new PropertyValue(PropertyDataType.Double, 1.0))
-						.addProperty("engHigh", new PropertyValue(PropertyDataType.Double, 10.0))
+						.addProperty("engUnit", new PropertyValue<>(PropertyDataType.String, "My Units"))
+						.addProperty("engLow", new PropertyValue<>(PropertyDataType.Double, 1.0))
+						.addProperty("engHigh", new PropertyValue<>(PropertyDataType.Double, 10.0))
 						.addProperty("Custom nested device prop",
-								new PropertyValue(PropertyDataType.PropertySet, nestedPropertySet))
+								new PropertyValue<>(PropertyDataType.PropertySet, nestedPropertySet))
 						/*
 						 * .addProperty("CustA", new PropertyValue(PropertyDataType.String, "Custom A"))
 						 * .addProperty("CustB", new PropertyValue(PropertyDataType.Double, 10.0)) .addProperty("CustC",
@@ -429,12 +429,11 @@ public class SparkplugExample implements MqttCallbackExtended {
 		metrics.addAll(newComplexTemplate(isBirth));
 
 		// Metrics with properties
-		metrics.add(new MetricBuilder("IntWithProps", Int32, random.nextInt()).properties(
-				new PropertySetBuilder().addProperty("engUnit", new PropertyValue(PropertyDataType.String, "My Units"))
-						.addProperty("engHigh", new PropertyValue(PropertyDataType.Int32, Integer.MAX_VALUE))
-						.addProperty("engLow", new PropertyValue(PropertyDataType.Int32, Integer.MIN_VALUE))
-						.createPropertySet())
-				.createMetric());
+		metrics.add(new MetricBuilder("IntWithProps", Int32, random.nextInt()).properties(new PropertySetBuilder()
+				.addProperty("engUnit", new PropertyValue<>(PropertyDataType.String, "My Units"))
+				.addProperty("engHigh", new PropertyValue<>(PropertyDataType.Int32, Integer.MAX_VALUE))
+				.addProperty("engLow", new PropertyValue<>(PropertyDataType.Int32, Integer.MIN_VALUE))
+				.createPropertySet()).createMetric());
 
 		// Aliased metric
 		// The name and alias will be specified in a NBIRTH/DBIRTH message.
@@ -453,31 +452,32 @@ public class SparkplugExample implements MqttCallbackExtended {
 		return new PropertySetBuilder().addProperties(newProps(true)).createPropertySet();
 	}
 
-	private Map<String, PropertyValue> newProps(boolean withPropTypes) throws SparkplugException {
+	private Map<String, PropertyValue<? extends PropertyDataType>> newProps(boolean withPropTypes)
+			throws SparkplugException {
 		Random random = new Random();
-		Map<String, PropertyValue> propMap = new HashMap<String, PropertyValue>();
-		propMap.put("PropInt8", new PropertyValue(PropertyDataType.Int8, (byte) random.nextInt()));
-		propMap.put("PropInt16", new PropertyValue(PropertyDataType.Int16, (short) random.nextInt()));
-		propMap.put("PropInt32", new PropertyValue(PropertyDataType.Int32, random.nextInt()));
-		propMap.put("PropInt64", new PropertyValue(PropertyDataType.Int64, random.nextLong()));
-		propMap.put("PropUInt8", new PropertyValue(PropertyDataType.UInt8, getRandomUInt8()));
-		propMap.put("PropUInt16", new PropertyValue(PropertyDataType.UInt16, getRandomUInt16()));
-		propMap.put("PropUInt32", new PropertyValue(PropertyDataType.UInt32, getRandomUInt32()));
-		propMap.put("PropUInt64", new PropertyValue(PropertyDataType.UInt64, getRandomUInt64()));
-		propMap.put("PropFloat", new PropertyValue(PropertyDataType.Float, random.nextFloat()));
-		propMap.put("PropDouble", new PropertyValue(PropertyDataType.Double, random.nextDouble()));
-		propMap.put("PropBoolean", new PropertyValue(PropertyDataType.Boolean, random.nextBoolean()));
-		propMap.put("PropString", new PropertyValue(PropertyDataType.String, newUUID()));
-		propMap.put("PropDateTime", new PropertyValue(PropertyDataType.DateTime, new Date()));
-		propMap.put("PropText", new PropertyValue(PropertyDataType.Text, newUUID()));
+		Map<String, PropertyValue<? extends PropertyDataType>> propMap = new HashMap<>();
+		propMap.put("PropInt8", new PropertyValue<>(PropertyDataType.Int8, (byte) random.nextInt()));
+		propMap.put("PropInt16", new PropertyValue<>(PropertyDataType.Int16, (short) random.nextInt()));
+		propMap.put("PropInt32", new PropertyValue<>(PropertyDataType.Int32, random.nextInt()));
+		propMap.put("PropInt64", new PropertyValue<>(PropertyDataType.Int64, random.nextLong()));
+		propMap.put("PropUInt8", new PropertyValue<>(PropertyDataType.UInt8, getRandomUInt8()));
+		propMap.put("PropUInt16", new PropertyValue<>(PropertyDataType.UInt16, getRandomUInt16()));
+		propMap.put("PropUInt32", new PropertyValue<>(PropertyDataType.UInt32, getRandomUInt32()));
+		propMap.put("PropUInt64", new PropertyValue<>(PropertyDataType.UInt64, getRandomUInt64()));
+		propMap.put("PropFloat", new PropertyValue<>(PropertyDataType.Float, random.nextFloat()));
+		propMap.put("PropDouble", new PropertyValue<>(PropertyDataType.Double, random.nextDouble()));
+		propMap.put("PropBoolean", new PropertyValue<>(PropertyDataType.Boolean, random.nextBoolean()));
+		propMap.put("PropString", new PropertyValue<>(PropertyDataType.String, newUUID()));
+		propMap.put("PropDateTime", new PropertyValue<>(PropertyDataType.DateTime, new Date()));
+		propMap.put("PropText", new PropertyValue<>(PropertyDataType.Text, newUUID()));
 		if (withPropTypes) {
-			propMap.put("PropPropertySet", new PropertyValue(PropertyDataType.PropertySet,
+			propMap.put("PropPropertySet", new PropertyValue<>(PropertyDataType.PropertySet,
 					new PropertySetBuilder().addProperties(newProps(false)).createPropertySet()));
 			List<PropertySet> propsList = new ArrayList<PropertySet>();
 			propsList.add(new PropertySetBuilder().addProperties(newProps(false)).createPropertySet());
 			propsList.add(new PropertySetBuilder().addProperties(newProps(false)).createPropertySet());
 			propsList.add(new PropertySetBuilder().addProperties(newProps(false)).createPropertySet());
-			propMap.put("PropPropertySetList", new PropertyValue(PropertyDataType.PropertySetList, propsList));
+			propMap.put("PropPropertySetList", new PropertyValue<>(PropertyDataType.PropertySetList, propsList));
 		}
 		return propMap;
 	}

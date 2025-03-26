@@ -97,7 +97,7 @@ public class SparkplugBPayloadDecoder implements PayloadDecoder<SparkplugBPayloa
 		return builder.createPayload();
 	}
 
-	private Metric convertMetric(SparkplugBProto.Payload.Metric protoMetric, MetricDataTypeMap metricDataTypeMap,
+	protected Metric convertMetric(SparkplugBProto.Payload.Metric protoMetric, MetricDataTypeMap metricDataTypeMap,
 			String prefix) throws Exception {
 		// Convert the dataType
 		MetricDataType dataType = MetricDataType.fromInteger((protoMetric.getDatatype()));

@@ -191,7 +191,7 @@ public class SparkplugBPayloadMap extends SparkplugBPayload {
 	 * @return the {@link Metric} with the provided metric name
 	 */
 	public Metric getMetric(String metricName) {
-		return metricMap.get(metricName);
+		return metricMap == null ? null : metricMap.get(metricName);
 	}
 
 	/**

@@ -17,6 +17,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 
+import org.apache.commons.compress.utils.Lists;
 import org.eclipse.tahu.SparkplugException;
 import org.eclipse.tahu.exception.TahuErrorCode;
 import org.eclipse.tahu.exception.TahuException;
@@ -172,11 +173,15 @@ public class DataSet {
 	 */
 	@JsonGetter("rows")
 	public List<List<Object>> getRowsAsLists() {
-		List<List<Object>> list = new ArrayList<List<Object>>(getRows().size());
-		for (Row row : getRows()) {
-			list.add(Row.toValues(row));
+		if (getRows() == null) {
+			return Lists.newArrayList();
+		} else {
+			List<List<Object>> list = new ArrayList<List<Object>>(getRows().size());
+			for (Row row : getRows()) {
+				list.add(Row.toValues(row));
+			}
+			return list;
 		}
-		return list;
 	}
 
 	/**
@@ -312,11 +317,23 @@ public class DataSet {
 
 		public DataSetBuilder(DataSet dataSet) {
 			this.numOfColumns = dataSet.getNumOfColumns();
-			this.columnNames = new ArrayList<String>(dataSet.getColumnNames());
-			this.types = new ArrayList<DataSetDataType>(dataSet.getTypes());
-			this.rows = new ArrayList<Row>(dataSet.getRows().size());
-			for (Row row : dataSet.getRows()) {
-				rows.add(new RowBuilder(row).createRow());
+			if (dataSet.getColumnNames() == null) {
+				this.columnNames = Lists.newArrayList();
+			} else {
+				this.columnNames = new ArrayList<String>(dataSet.getColumnNames());
+			}
+			if (dataSet.getTypes() == null) {
+				this.types = Lists.newArrayList();
+			} else {
+				this.types = new ArrayList<DataSetDataType>(dataSet.getTypes());
+			}
+			if (dataSet.getRows() == null) {
+				this.rows = Lists.newArrayList();
+			} else {
+				this.rows = new ArrayList<Row>(dataSet.getRows().size());
+				for (Row row : dataSet.getRows()) {
+					rows.add(new RowBuilder(row).createRow());
+				}
 			}
 		}
 

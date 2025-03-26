@@ -56,17 +56,21 @@ public class PropertyValue<T extends PropertyDataType> {
 	}
 
 	public PropertyValue(PropertyValue<T> propertyValue) throws Exception {
+		if (propertyValue == null) {
+			return;
+		}
+
 		this.type = propertyValue.getType();
 		this.isNull = propertyValue.isNull();
 
 		if (!isNull) {
 			if (type == PropertyDataType.DateTime) {
-				this.value = new Date(((Date) value).getTime());
+				this.value = new Date(((Date) propertyValue.getValue()).getTime());
 			} else if (type == PropertyDataType.PropertySet) {
-				this.value = new PropertySet((PropertySet) value);
+				this.value = new PropertySet((PropertySet) propertyValue.getValue());
 			} else if (type == PropertyDataType.PropertySetList) {
 				@SuppressWarnings("unchecked")
-				List<PropertySet> originalPropertySetList = (List<PropertySet>) value;
+				List<PropertySet> originalPropertySetList = (List<PropertySet>) propertyValue.getValue();
 				List<PropertySet> newPropertySetList = new ArrayList<PropertySet>();
 				for (PropertySet propertySet : originalPropertySetList) {
 					newPropertySetList.add(new PropertySet(propertySet));
