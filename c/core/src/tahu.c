@@ -152,6 +152,38 @@ int add_property_to_set(org_eclipse_tahu_protobuf_Payload_PropertySet *propertys
     return 0;
 }
 
+int add_propertyset_to_set(org_eclipse_tahu_protobuf_Payload_PropertySet *existing_propertyset,
+                           const char *key,
+                           const org_eclipse_tahu_protobuf_Payload_PropertySet *new_propertyset) {
+    DEBUG_PRINT("Add propertyset to set...\n");
+    const int old_count = existing_propertyset->keys_count;
+    const int new_count = (old_count + 1);
+    const size_t key_allocation_size = sizeof(char *) * new_count;
+    const size_t value_allocation_size = sizeof(org_eclipse_tahu_protobuf_Payload_PropertyValue) * new_count;
+    void *key_allocation_result = realloc(existing_propertyset->keys, key_allocation_size);
+    void *value_allocation_result = realloc(existing_propertyset->values, value_allocation_size);
+    if ((key_allocation_result == NULL) || (value_allocation_result == NULL)) {
+        fprintf(stderr, "realloc failed in add_metric_to_payload\n");
+        return -1;
+    }
+    existing_propertyset->keys = (char**)key_allocation_result;
+    existing_propertyset->keys_count = new_count;
+    existing_propertyset->values = (org_eclipse_tahu_protobuf_Payload_PropertyValue *)value_allocation_result;
+    existing_propertyset->values_count = new_count;
+    existing_propertyset->keys[old_count] = strdup(key);
+    if (existing_propertyset->keys[old_count] == NULL) {
+        fprintf(stderr, "strdup failed in add_metric_to_payload\n");
+        return -1;
+    }
+    org_eclipse_tahu_protobuf_Payload_PropertyValue *p_new_property_value = &existing_propertyset->values[old_count];
+    memset(p_new_property_value, 0, sizeof(org_eclipse_tahu_protobuf_Payload_PropertyValue));
+    p_new_property_value->has_type = true;
+    p_new_property_value->type = PROPERTY_DATA_TYPE_PROPERTYSET;
+    p_new_property_value->which_value = org_eclipse_tahu_protobuf_Payload_PropertyValue_propertyset_value_tag;
+    memcpy(&p_new_property_value->value.propertyset_value, new_propertyset, sizeof(org_eclipse_tahu_protobuf_Payload_PropertySet));
+    return 0;
+}
+
 int add_propertyset_to_metric(org_eclipse_tahu_protobuf_Payload_Metric *metric,
                               org_eclipse_tahu_protobuf_Payload_PropertySet *properties) {
     DEBUG_PRINT("Add propertyset to metric...\n");

@@ -1,2 +1,4 @@
 test_dynamic.dSYM
 test_static.dSYM
+test_dynamic
+test_static

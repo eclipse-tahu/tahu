@@ -106,6 +106,7 @@ extern "C" {
 #define PROPERTY_DATA_TYPE_STRING 12
 #define PROPERTY_DATA_TYPE_DATETIME 13
 #define PROPERTY_DATA_TYPE_TEXT 14
+#define PROPERTY_DATA_TYPE_PROPERTYSET 20
 
 /**
  * Attach Metadata to an existing Metric.
@@ -180,6 +181,32 @@ int add_property_to_set(org_eclipse_tahu_protobuf_Payload_PropertySet *propertys
                         uint32_t type,
                         const void *value,
                         size_t size_of_value);
+
+/**
+ * Add a PropertySet as property to an existing PropertySet.
+ *
+ * <p>Caution: The propertyset structure is duplicated via shallow
+ * copy, and it is expected that any pointers within it are safe
+ * to pass to free(). This will happen if pb_release() is called
+ * on this structure or any structure referencing it, for
+ * example via a call to free_payload().
+ *
+ * @param existing_propertyset
+ *              The propertyset into which to add the new property with has the value
+ *              of the requested new propertyset
+ *
+ * @param key   Pointer to null-terminated string giving name of new property
+ *
+ * @param new_propertyset
+ *              The new propertyset to add
+ *
+ * @return Returns
+ *              >= 0 on success, or negative on failure
+ */
+int add_propertyset_to_set(
+    org_eclipse_tahu_protobuf_Payload_PropertySet *existing_propertyset,
+    const char *key,
+    const org_eclipse_tahu_protobuf_Payload_PropertySet *new_propertyset);
 
 /**
  * Add a PropertySet to an existing Metric
