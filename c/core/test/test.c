@@ -462,6 +462,20 @@ void publish_node_birth(struct mosquitto *mosq) {
     add_propertyset_to_metric(&prop_metric, &properties);
     add_metric_to_payload(&nbirth_payload, &prop_metric);
 
+
+    // Add a metric with a PropertySet where a property value is a PropertySet
+    fprintf(stdout, "Adding metric: 'Node Metric3'\n");
+    org_eclipse_tahu_protobuf_Payload_PropertySet inner_propertyset = org_eclipse_tahu_protobuf_Payload_PropertySet_init_default;
+    uint32_t nbirth_metric_three_inner_propset_value_one = 42;
+    uint32_t nbirth_metric_three_inner_propset_value_two = 4242;
+    add_property_to_set(&inner_propertyset, "key1", METRIC_DATA_TYPE_INT32, &nbirth_metric_three_inner_propset_value_one, sizeof(&nbirth_metric_three_inner_propset_value_one));
+    add_property_to_set(&inner_propertyset, "key2", METRIC_DATA_TYPE_INT32, &nbirth_metric_three_inner_propset_value_two, sizeof(&nbirth_metric_three_inner_propset_value_two));
+    org_eclipse_tahu_protobuf_Payload_PropertySet outer_propertyset = org_eclipse_tahu_protobuf_Payload_PropertySet_init_default;
+    add_propertyset_to_set(&outer_propertyset, "myset", &inner_propertyset);
+    org_eclipse_tahu_protobuf_Payload_Metric prop_metric3 = org_eclipse_tahu_protobuf_Payload_Metric_init_default;
+    add_propertyset_to_metric(&prop_metric3, &outer_propertyset);
+    add_metric_to_payload(&nbirth_payload, &prop_metric3);
+
     // Create a metric called RPMs which is a member of the UDT definition - note aliases do not apply to UDT members
     org_eclipse_tahu_protobuf_Payload_Metric rpms_metric = org_eclipse_tahu_protobuf_Payload_Metric_init_default;
     uint32_t rpms_value = 0;
