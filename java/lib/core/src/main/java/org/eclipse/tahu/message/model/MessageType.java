@@ -138,4 +138,24 @@ public enum MessageType {
 	public boolean isRecord() {
 		return this.equals(DRECORD) || this.equals(NRECORD);
 	}
+
+	/**
+	 * Whether or not this is an Edge Node level Message Type (NBIRTH, NDATA, NCMD, NDEATH, or NRECORD)
+	 *
+	 * @return true if this is an Edge Node level Message Type, otherwise false
+	 */
+	public boolean isEdgeNodeMessage() {
+		return this.equals(NBIRTH) || this.equals(NDATA) || this.equals(NCMD) || this.equals(NDEATH)
+				|| this.equals(NRECORD);
+	}
+
+	/**
+	 * Whether or not this is an Device level Message Type (DBIRTH, DDATA, DCMD, DDEATH, or DRECORD)
+	 *
+	 * @return true if this is an Device level Message Type, otherwise false
+	 */
+	public boolean isDeviceMessage() {
+		return this.equals(DBIRTH) || this.equals(DDATA) || this.equals(DCMD) || this.equals(DDEATH)
+				|| this.equals(DRECORD);
+	}
 }

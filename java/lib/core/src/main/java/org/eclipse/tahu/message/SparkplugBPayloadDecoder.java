@@ -25,6 +25,8 @@ import java.util.List;
 import java.util.Map;
 
 import org.eclipse.tahu.SparkplugInvalidTypeException;
+import org.eclipse.tahu.exception.TahuErrorCode;
+import org.eclipse.tahu.exception.TahuException;
 import org.eclipse.tahu.message.model.DataSet.DataSetBuilder;
 import org.eclipse.tahu.message.model.DataSetDataType;
 import org.eclipse.tahu.message.model.File;
@@ -81,7 +83,17 @@ public class SparkplugBPayloadDecoder implements PayloadDecoder<SparkplugBPayloa
 
 		// Set the Metrics
 		for (SparkplugBProto.Payload.Metric protoMetric : protoPayload.getMetricsList()) {
-			builder.addMetric(convertMetric(protoMetric, metricDataTypeMap, null));
+			try {
+				builder.addMetric(convertMetric(protoMetric, metricDataTypeMap, null));
+			} catch (InterruptedException e) {
+				logger.warn(
+						"Interrupted - failed to handle metric name={} with alias={} - excluding from decoded payload",
+						protoMetric.getName(), protoMetric.getAlias());
+				Thread.currentThread().interrupt();
+			} catch (Exception e) {
+				logger.warn("Failed to handle metric name={} with alias={} - excluding from decoded payload",
+						protoMetric.getName(), protoMetric.getAlias(), e);
+			}
 		}
 
 		// Set the body
@@ -533,14 +545,15 @@ public class SparkplugBPayloadDecoder implements PayloadDecoder<SparkplugBPayloa
 				return protoParameter.getLongValue();
 			} else {
 				logger.error("Invalid value for UInt32 datatype");
-				throw new Exception("Failed to decode: UInt32 Parameter Type " + type);
+				throw new TahuException(TahuErrorCode.INVALID_ARGUMENT,
+						"Failed to decode: UInt32 Parameter Type " + type);
 			}
 		} else if (type == MetricDataType.UInt64.toIntValue()) {
 			return new BigInteger(Long.toUnsignedString(protoParameter.getLongValue()));
 		} else if (type == MetricDataType.String.toIntValue() || type == MetricDataType.Text.toIntValue()) {
 			return protoParameter.getStringValue();
 		} else {
-			throw new Exception("Failed to decode: Unknown Parameter Type " + type);
+			throw new TahuException(TahuErrorCode.INVALID_ARGUMENT, "Failed to decode: Unknown Parameter Type " + type);
 		}
 	}
 
@@ -637,7 +650,7 @@ public class SparkplugBPayloadDecoder implements PayloadDecoder<SparkplugBPayloa
 			}
 		} else {
 			logger.error("Unknown DataSetDataType: " + protoType);
-			throw new Exception("Failed to decode");
+			throw new TahuException(TahuErrorCode.INVALID_ARGUMENT, "Failed to decode DataSetDataType: " + protoType);
 		}
 	}
 }

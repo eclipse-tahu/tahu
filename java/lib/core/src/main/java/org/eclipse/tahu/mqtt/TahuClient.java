@@ -18,8 +18,11 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.Date;
 import java.util.Map;
+import java.util.Set;
 import java.util.SortedMap;
-import java.util.TreeMap;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentSkipListMap;
+import java.util.concurrent.Semaphore;
 
 import org.eclipse.paho.client.mqttv3.IMqttActionListener;
 import org.eclipse.paho.client.mqttv3.IMqttDeliveryToken;
@@ -101,7 +104,7 @@ public class TahuClient implements MqttCallbackExtended {
 	/**
 	 * A list of topics the client has subscribed on
 	 */
-	private SortedMap<String, Integer> subscriptions = new TreeMap<>();
+	private final SortedMap<String, Integer> subscriptions = new ConcurrentSkipListMap<>();
 
 	/*
 	 * Odds/ends
@@ -114,7 +117,7 @@ public class TahuClient implements MqttCallbackExtended {
 	 * fail with and INTERNAL_ERROR: Caused by: org.eclipse.paho.client.mqttv3.MqttException: Too many publishes in
 	 * progress
 	 */
-	private int maxInFlightMessages = 10;
+	private int maxInFlightMessages = 32768;
 
 	/*
 	 * The maximum number of topics per individual subscribe message.
@@ -144,6 +147,10 @@ public class TahuClient implements MqttCallbackExtended {
 	// Whether or not the BIRTH should be published on connect and controls the STATE of the client
 	private boolean onlineState;
 
+	private Semaphore semaphore;
+	private Set<Integer> lockedMessageSet;
+	private final Object messageLock;
+
 	public TahuClient(final MqttClientId clientId, final MqttServerName mqttServerName,
 			final MqttServerUrl mqttServerUrl, final String username, final String password, boolean cleanSession,
 			int keepAlive, ClientCallback callback, RandomStartupDelay randomStartupDelay, boolean onlineState) {
@@ -165,6 +172,7 @@ public class TahuClient implements MqttCallbackExtended {
 		this.renewOnlineDate();
 		this.renewOfflineDate();
 		this.onlineState = onlineState;
+		this.messageLock = new Object();
 	}
 
 	public TahuClient(final MqttClientId clientId, final MqttServerName mqttServerName,
@@ -218,6 +226,10 @@ public class TahuClient implements MqttCallbackExtended {
 
 	protected void setMqttConnectOptions(MqttConnectOptions connectOptions) {
 		this.connectOptions = connectOptions;
+	}
+
+	public int getAvailablePublishPermits() {
+		return semaphore != null ? semaphore.availablePermits() : 0;
 	}
 
 	public long getNumMesgsArrived() {
@@ -455,8 +467,35 @@ public class TahuClient implements MqttCallbackExtended {
 				throw new TahuException(TahuErrorCode.INTERNAL_ERROR,
 						"MQTT client: " + clientId.getMqttClientId() + " is null");
 			} else if (client.isConnected()) {
-				logger.debug("{}: Publishing on Topic {}, Payload Size = {}", getClientId(), topic, payload.length);
-				return client.publish(topic, payload, qos, retained);
+				if (qos == 0) {
+					logger.debug("{}: Publishing with QoS0 on {}, Payload size = {}", getClientId(), topic,
+							payload.length);
+					return client.publish(topic, payload, qos, retained);
+				} else {
+					synchronized (messageLock) {
+						semaphore.acquire();
+						logger.trace("{}: Took permit in publish - available permits remaining: {}", getClientId(),
+								semaphore.availablePermits());
+
+						IMqttDeliveryToken token = null;
+						try {
+							logger.debug("{}: Publishing with QoS{} on {}, Payload size = {}", getClientId(), qos,
+									topic, payload.length);
+							token = client.publish(topic, payload, qos, retained);
+							lockedMessageSet.add(token.getMessageId());
+							return token;
+						} catch (Throwable t) {
+							logger.error(
+									"{}: Failed to publish on {} - retrying and releasing permit - available permits: {}",
+									getClientId(), topic, semaphore.availablePermits(), t);
+							if (token != null) {
+								semaphore.release();
+								lockedMessageSet.remove(token.getMessageId());
+							}
+							throw new TahuException(TahuErrorCode.INTERNAL_ERROR, t);
+						}
+					}
+				}
 			} else {
 				throw new TahuException(TahuErrorCode.INTERNAL_ERROR,
 						"MQTT client: " + clientId.getMqttClientId() + " is not connected");
@@ -625,12 +664,24 @@ public class TahuClient implements MqttCallbackExtended {
 
 	@Override
 	public void deliveryComplete(IMqttDeliveryToken token) {
-		synchronized (lwtDeliveryLock) {
-			if (lwtDeliveryToken != null && lwtDeliveryToken.getMessageId() == token.getMessageId()) {
-				logger.info("{}: LWT Delivery complete for {}", getClientId(), token.getMessageId());
-				lwtDeliveryToken = null;
-			} else {
-				logger.debug("{}: Delivery complete for {}", getClientId(), token.getMessageId());
+		try {
+			synchronized (lwtDeliveryLock) {
+				if (lwtDeliveryToken != null && lwtDeliveryToken.getMessageId() == token.getMessageId()) {
+					logger.info("{}: LWT Delivery complete for {}", getClientId(), token.getMessageId());
+					lwtDeliveryToken = null;
+				} else {
+					logger.debug("{}: Delivery complete for {}", getClientId(), token.getMessageId());
+				}
+			}
+		} catch (Throwable t) {
+			logger.error("Failed to handle delivery complete for {}", token);
+		} finally {
+			synchronized (messageLock) {
+				if (lockedMessageSet.remove(token.getMessageId())) {
+					logger.trace("{}: Releasing permit - Available permits: {}", getClientId(),
+							semaphore.availablePermits());
+					semaphore.release();
+				}
 			}
 		}
 	}
@@ -902,7 +953,12 @@ public class TahuClient implements MqttCallbackExtended {
 						connectOptions.setWill(lwtTopic, lwtPayload, MqttOperatorDefs.QOS1, lwtRetain);
 					}
 				}
+				logger.trace("Setting max in-flight messages to {}", getMaxInflightMessages());
 				connectOptions.setMaxInflight(getMaxInflightMessages());
+				synchronized (messageLock) {
+					semaphore = new Semaphore(getMaxInflightMessages(), true);
+					lockedMessageSet = ConcurrentHashMap.newKeySet();
+				}
 
 				// Create the client instance
 				logger.info("{}: Creating the MQTT Client to {} on thread {}", getClientId(), getMqttServerUrl(),
@@ -1065,9 +1121,7 @@ public class TahuClient implements MqttCallbackExtended {
 						if (client == null || !client.isConnected()) {
 							Thread.sleep(retryDelay);
 						} else {
-							logger.debug("{}: Publishing on {}, Payload size = {}", getClientId(), topic,
-									payload.length);
-							client.publish(topic, payload, qos, retained);
+							handlePublish();
 						}
 					}
 
@@ -1079,14 +1133,40 @@ public class TahuClient implements MqttCallbackExtended {
 					if (client == null) {
 						throw new TahuException(TahuErrorCode.INTERNAL_ERROR, "MQTT client is null");
 					} else if (client.isConnected()) {
-						logger.debug("{}: Publishing on {}, Payload size = {}", getClientId(), topic, payload.length);
-						client.publish(topic, payload, qos, retained);
+						handlePublish();
 					} else {
 						throw new TahuException(TahuErrorCode.INTERNAL_ERROR, "MQTT client not connected");
 					}
 				}
 			} catch (Exception e) {
 				logger.error("{}: Failed to publish", getClientId(), e);
+			}
+		}
+
+		private void handlePublish() throws Exception {
+			if (qos == 0) {
+				logger.debug("{}: Publishing with QoS0 on {}, Payload size = {}", getClientId(), topic, payload.length);
+				client.publish(topic, payload, qos, retained);
+			} else {
+				synchronized (messageLock) {
+					semaphore.acquire();
+					logger.trace("{}: Took permit - available permits remaining: {}", getClientId(),
+							semaphore.availablePermits());
+
+					IMqttDeliveryToken token = null;
+					try {
+						logger.debug("{}: Publishing on {}, Payload size = {}", getClientId(), topic, payload.length);
+						token = client.publish(topic, payload, qos, retained);
+						lockedMessageSet.add(token.getMessageId());
+					} catch (Throwable t) {
+						logger.error("{}: Failed to publish on {} - releasing permit - available permits: {}",
+								getClientId(), topic, semaphore.availablePermits(), t);
+						if (token != null) {
+							semaphore.release();
+							lockedMessageSet.remove(token.getMessageId());
+						}
+					}
+				}
 			}
 		}
 	}
@@ -1390,7 +1470,7 @@ public class TahuClient implements MqttCallbackExtended {
 					if (useSparkplugStatePayload) {
 						try {
 							ObjectMapper mapper = new ObjectMapper();
-							StatePayload statePayload = new StatePayload(false, new Date().getTime());
+							StatePayload statePayload = new StatePayload(false, lastStateDeathPayloadTimestamp);
 							byte[] payload = mapper.writeValueAsString(statePayload).getBytes();
 							lwtDeliveryToken = publish(lwtTopic, payload, lwtQoS, lwtRetain);
 						} catch (Exception e) {
