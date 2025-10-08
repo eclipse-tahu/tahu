@@ -29,9 +29,11 @@ extern "C" {
 #endif
 
 // Enable/disable debug messages
+#ifndef SPARKPLUG_DEBUG
 #define SPARKPLUG_DEBUG 1
+#endif
 
-#ifdef SPARKPLUG_DEBUG
+#if SPARKPLUG_DEBUG
 #define DEBUG_PRINT(...) printf(__VA_ARGS__)
 #else
 #define DEBUG_PRINT(...) do {} while (0)
