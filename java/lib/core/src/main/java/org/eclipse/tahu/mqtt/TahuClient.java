@@ -500,6 +500,10 @@ public class TahuClient implements MqttCallbackExtended {
 				throw new TahuException(TahuErrorCode.INTERNAL_ERROR,
 						"MQTT client: " + clientId.getMqttClientId() + " is not connected");
 			}
+		} catch (InterruptedException e) {
+			Thread.currentThread().interrupt();
+			logger.warn("Interrupted while trying to publish on {}", topic);
+			return null;
 		} catch (Exception e) {
 			throw new TahuException(TahuErrorCode.INTERNAL_ERROR, e);
 		}
@@ -829,6 +833,7 @@ public class TahuClient implements MqttCallbackExtended {
 				try {
 					Thread.sleep(randomDelay);
 				} catch (InterruptedException e) {
+					Thread.currentThread().interrupt();
 					logger.warn("{}: Sleep interrupted", getClientId(), e);
 				}
 			}
@@ -942,14 +947,16 @@ public class TahuClient implements MqttCallbackExtended {
 				}
 				connectOptions.setKeepAliveInterval(keepAlive);
 				if (lwtTopic != null) {
-					logger.debug("{}: Setting WILL on {} with retain {}", getClientId(), lwtTopic, lwtRetain);
 					if (useSparkplugStatePayload) {
 						ObjectMapper mapper = new ObjectMapper();
 						lastStateDeathPayloadTimestamp = new Date().getTime();
 						StatePayload statePayload = new StatePayload(false, lastStateDeathPayloadTimestamp);
+						logger.debug("{}: Setting Sparkplug WILL on {} with retain={} and payload={}", getClientId(),
+								lwtTopic, lwtRetain, statePayload);
 						byte[] payload = mapper.writeValueAsString(statePayload).getBytes();
 						connectOptions.setWill(lwtTopic, payload, MqttOperatorDefs.QOS1, lwtRetain);
 					} else {
+						logger.debug("{}: Setting WILL on {} with retain={}", getClientId(), lwtTopic, lwtRetain);
 						connectOptions.setWill(lwtTopic, lwtPayload, MqttOperatorDefs.QOS1, lwtRetain);
 					}
 				}
@@ -992,6 +999,7 @@ public class TahuClient implements MqttCallbackExtended {
 								// Sleep for the connect retry interval
 								Thread.sleep(getConnectRetryInterval());
 							} catch (InterruptedException ie) {
+								Thread.currentThread().interrupt();
 								logger.info("{}: Connect thread {} interrupted - giving up",
 										Thread.currentThread().getName(), getClientId());
 								return;
@@ -1028,6 +1036,7 @@ public class TahuClient implements MqttCallbackExtended {
 								Thread.currentThread().getName());
 						state.setInProgress(false);
 					} catch (InterruptedException ie) {
+						Thread.currentThread().interrupt();
 						logger.info("{}: Connect thread 2 interrupted - giving up", getClientId());
 						state.setInProgress(false);
 						return;
@@ -1079,6 +1088,7 @@ public class TahuClient implements MqttCallbackExtended {
 				Thread.sleep(getConnectRetryInterval());
 			}
 		} catch (InterruptedException ie) {
+			Thread.currentThread().interrupt();
 			logger.warn("{}: InterruptedException while preparing to reconnect", getClientId(), ie);
 			return;
 		}
@@ -1248,6 +1258,7 @@ public class TahuClient implements MqttCallbackExtended {
 					try {
 						Thread.sleep(DEFAULT_CONNECT_MONITOR_INTERVAL);
 					} catch (InterruptedException ie) {
+						Thread.currentThread().interrupt();
 						logger.debug("{}: ConnectionMonitor interrupted", monitoredClientId);
 					}
 				}
@@ -1334,8 +1345,10 @@ public class TahuClient implements MqttCallbackExtended {
 										Thread.sleep(1000);
 
 										synchronized (clientLock) {
-											// Force the disconnect and return
-											client.disconnectForcibly(0, 1, false);
+											if (client != null) {
+												// Force the disconnect and return
+												client.disconnectForcibly(0, 1, false);
+											}
 										}
 										return;
 									} catch (Exception e) {
@@ -1350,9 +1363,15 @@ public class TahuClient implements MqttCallbackExtended {
 							public void onFailure(IMqttToken asyncActionToken, Throwable exception) {
 								synchronized (clientLock) {
 									try {
-										logger.error("{}: server {} - Failed to subscribe on {}", getClientId(),
-												getMqttServerName(), topicStr);
-										client.disconnectForcibly(0, 1, false);
+										if (client != null) {
+											logger.error(
+													"{}: server {} - Failed to subscribe on {} - forcing disconnect",
+													getClientId(), getMqttServerName(), topicStr);
+											client.disconnectForcibly(0, 1, false);
+										} else {
+											logger.error("{}: server {} - Failed to subscribe on {} - client is null",
+													getClientId(), getMqttServerName(), topicStr);
+										}
 									} catch (MqttException e) {
 										logger.error("{}: server {} - Failed disconnect on failed subscribe",
 												getClientId(), getMqttServerName(), e);
@@ -1429,17 +1448,21 @@ public class TahuClient implements MqttCallbackExtended {
 		synchronized (clientLock) {
 			if (birthTopic != null && client.isConnected()) {
 				try {
-					logger.debug("{}: Publishing BIRTH on {} with retain {}", getClientId(), birthTopic, birthRetain);
+
 					if (useSparkplugStatePayload) {
 						try {
 							ObjectMapper mapper = new ObjectMapper();
 							StatePayload statePayload = new StatePayload(true, lastStateDeathPayloadTimestamp);
+							logger.debug("{}: Publishing Sparkplug BIRTH on {} with retain={} and payload: {}",
+									getClientId(), birthTopic, birthRetain, statePayload);
 							byte[] payload = mapper.writeValueAsString(statePayload).getBytes();
 							publish(birthTopic, payload, MqttOperatorDefs.QOS1, birthRetain);
 						} catch (Exception e) {
 							logger.error("{}: Failed to publish the BIRTH message on {}", getClientId(), birthTopic, e);
 						}
 					} else {
+						logger.debug("{}: Publishing BIRTH on {} with retain={}", getClientId(), birthTopic,
+								birthRetain);
 						publish(birthTopic, birthPayload, MqttOperatorDefs.QOS1, birthRetain);
 					}
 				} catch (TahuException ce) {
@@ -1459,8 +1482,7 @@ public class TahuClient implements MqttCallbackExtended {
 			boolean clientConnected = client != null && client.isConnected();
 			boolean lwtDeliveryComplete = false;
 			if (lwtTopic != null && clientConnected) {
-				logger.info("{}: Publishing LWT on {} with qos={} and retain={}", getClientId(), lwtTopic, lwtQoS,
-						lwtRetain);
+				boolean lwtPublished = false;
 				synchronized (lwtDeliveryLock) {
 					/*
 					 * Synchronization with the deliveryComplete() callback is needed to ensure that
@@ -1471,19 +1493,28 @@ public class TahuClient implements MqttCallbackExtended {
 						try {
 							ObjectMapper mapper = new ObjectMapper();
 							StatePayload statePayload = new StatePayload(false, lastStateDeathPayloadTimestamp);
+							logger.debug("{}: Publishing Sparkplug LWT on {} with qos={} and retain={} and payload: {}",
+									getClientId(), lwtTopic, lwtQoS, lwtRetain, statePayload);
 							byte[] payload = mapper.writeValueAsString(statePayload).getBytes();
 							lwtDeliveryToken = publish(lwtTopic, payload, lwtQoS, lwtRetain);
 						} catch (Exception e) {
 							logger.error("{}: Failed to publish the LWT message on {}", getClientId(), lwtTopic, e);
 						}
 					} else {
+						logger.debug("{}: Publishing LWT on {} with qos={} and retain={}", getClientId(), lwtTopic,
+								lwtQoS, lwtRetain);
 						lwtDeliveryToken = publish(lwtTopic, lwtPayload, lwtQoS, lwtRetain);
 					}
-					logger.debug("{}: published on LWT Topic={}, messageId={}", getClientId(), lwtTopic,
-							lwtDeliveryToken.getMessageId());
+					if (lwtDeliveryToken != null) {
+						logger.debug("{}: published on LWT Topic={}, messageId={}", getClientId(), lwtTopic,
+								lwtDeliveryToken.getMessageId());
+						lwtPublished = true;
+					} else {
+						logger.warn("Failed to publish LWT {}", lwtTopic);
+					}
 				}
 
-				if (waitForLwt) {
+				if (lwtPublished && waitForLwt) {
 					lwtDeliveryComplete = isLwtDeliveryComplete();
 					logger.trace("{}: Completed LWT Delivery? {}", getClientId(), lwtDeliveryComplete);
 				} else {
@@ -1578,6 +1609,7 @@ public class TahuClient implements MqttCallbackExtended {
 					Thread.sleep(250);
 				}
 			} catch (InterruptedException e) {
+				Thread.currentThread().interrupt();
 				logger.warn("{}: Interrupted while waiting for LWT", getClientId());
 			}
 		}

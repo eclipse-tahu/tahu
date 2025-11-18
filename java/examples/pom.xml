@@ -30,7 +30,7 @@
 
   <groupId>org.eclipse.tahu</groupId>
   <artifactId>tahu-examples</artifactId>
-  <version>1.0.16</version>
+  <version>1.0.17</version>
   <packaging>pom</packaging>
 
   <name>Eclipse Tahu</name>
@@ -122,19 +122,19 @@
     <dependency>
       <groupId>junit</groupId>
       <artifactId>junit</artifactId>
-      <version>4.13.2</version>
+      <version>${junit.version}</version>
       <scope>test</scope>
     </dependency>
     <dependency>
       <groupId>org.testng</groupId>
       <artifactId>testng</artifactId>
-      <version>6.9.10</version>
+      <version>${testng.version}</version>
       <scope>test</scope>
     </dependency>
     <dependency>
       <groupId>org.assertj</groupId>
       <artifactId>assertj-core</artifactId>
-      <version>3.5.1</version>
+      <version>${assertj.core.version}</version>
       <scope>test</scope>
     </dependency>
     <dependency>

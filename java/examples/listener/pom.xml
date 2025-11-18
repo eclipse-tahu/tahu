@@ -18,7 +18,7 @@
   <parent>
     <groupId>org.eclipse.tahu</groupId>
     <artifactId>tahu-examples</artifactId>
-    <version>1.0.16</version>
+    <version>1.0.17</version>
     <relativePath>../pom.xml</relativePath>
   </parent>
 
@@ -83,33 +83,6 @@
                 <transformer
                   implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer" />
               </transformers>
-            </configuration>
-          </execution>
-        </executions>
-      </plugin>
-      <plugin>
-        <groupId>org.codehaus.mojo</groupId>
-        <artifactId>license-maven-plugin</artifactId>
-        <version>1.8</version>
-        <executions>
-          <execution>
-            <id>add-third-party</id>
-            <phase>package</phase>
-            <goals>
-              <goal>add-third-party</goal>
-              <goal>download-licenses</goal>
-            </goals>
-            <configuration>
-              <useMissingFile>true</useMissingFile>
-              <excludedScopes>test</excludedScopes>
-              <excludedGroups> (org.eclipse.tahu*)
-              </excludedGroups>
-              <licenseMerges>
-                <licenseMerge>The Apache Software License, Version
-                  2.0|Apache License, Version 2.0|Apache Public License
-                  2.0|Apache License 2.0|Apache Software License -
-                  Version 2.0</licenseMerge>
-              </licenseMerges>
             </configuration>
           </execution>
         </executions>
