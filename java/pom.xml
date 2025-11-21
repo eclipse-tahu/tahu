@@ -29,7 +29,7 @@
     <slf4j.version>2.0.17</slf4j.version>
     <jaxb.api.version>2.3.1</jaxb.api.version>
     <logback.version>1.5.21</logback.version>
-    <maven.compiler.version>3.8.1</maven.compiler.version>
+    <maven.compiler.version>3.14.1</maven.compiler.version>
     <maven.bundle.version>5.1.1</maven.bundle.version>
     <paho.version>1.2.5</paho.version>
     <protobuf.version>3.25.5</protobuf.version>
@@ -101,17 +101,6 @@
     <url>https://github.com/eclipse/tahu.git</url>
     <connection>scm:git:git@github.com:eclipse/tahu.git</connection>
   </scm>
-
-  <distributionManagement>
-    <snapshotRepository>
-      <id>ossrh</id>
-      <url>https://oss.sonatype.org/content/repositories/snapshots</url>
-    </snapshotRepository>
-    <repository>
-      <id>ossrh</id>
-      <url>https://oss.sonatype.org/service/local/staging/deploy/maven2/</url>
-    </repository>
-  </distributionManagement>
 
   <modules>
     <module>lib/core/pom.xml</module>
@@ -201,8 +190,8 @@
         <artifactId>maven-compiler-plugin</artifactId>
         <version>${maven.compiler.version}</version>
         <configuration>
-          <source>1.8</source>
-          <target>1.8</target>
+          <source>17</source>
+          <target>17</target>
           <encoding>UTF-8</encoding>
         </configuration>
       </plugin>
@@ -253,38 +242,18 @@
           </execution>
         </executions>
       </plugin>
+      <!--
+      The following is based on this: https://gitlab.eclipse.org/eclipsefdn/helpdesk/-/issues/6331
+      -->
       <plugin>
-        <!--
-          Use the Nexus Staging plugin as a full replacement for the standard
-          Maven Deploy plugin.
-          See https://github.com/sonatype/nexus-maven-plugins/tree/master/staging/maven-plugin
-          why this makes sense :-)
-          We can control whether we want to deploy to the Eclipse repo or Maven Central
-          by a combination of the version being a SNAPHOT or release version and property
-          skipStaging=true/false.
-          In any case we can take advantage of the plugin's "deferred deploy" feature which
-          makes sure that all artifacts of a multi-module project are deployed as a whole
-          at the end of the build process instead of deploying each module's artifacts
-          individually as part of building the module.
-        -->
-        <groupId>org.sonatype.plugins</groupId>
-        <artifactId>nexus-staging-maven-plugin</artifactId>
-        <version>1.6.8</version>
+        <groupId>org.sonatype.central</groupId>
+        <artifactId>central-publishing-maven-plugin</artifactId>
+        <version>0.9.0</version>
         <extensions>true</extensions>
         <configuration>
-          <serverId>ossrh</serverId>
-          <nexusUrl>https://oss.sonatype.org</nexusUrl>
-          <autoReleaseAfterClose>true</autoReleaseAfterClose>
-          <skipNexusStagingDeployMojo>false</skipNexusStagingDeployMojo>
+          <publishingServerId>central</publishingServerId>
+          <autoPublish>true</autoPublish>
         </configuration>
-        <!-- https://stackoverflow.com/questions/70153962/nexus-staging-maven-plugin-maven-deploy-failed-an-api-incompatibility-was-enco -->
-        <dependencies>
-          <dependency>
-            <groupId>com.thoughtworks.xstream</groupId>
-            <artifactId>xstream</artifactId>
-            <version>1.4.15</version> <!-- apparently this needs to be exactly this version -->
-          </dependency>
-        </dependencies>
       </plugin>
     </plugins>
     <extensions>
