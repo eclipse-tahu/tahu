@@ -20,6 +20,8 @@ import org.eclipse.tahu.message.model.File;
 import org.eclipse.tahu.message.model.MetaData;
 import org.eclipse.tahu.message.model.Metric;
 import org.eclipse.tahu.message.model.MetricDataType;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -33,6 +35,8 @@ import com.fasterxml.jackson.databind.deser.std.StdDeserializer;
  * A custom JSON deserializer for {@link Metric} instances.
  */
 public class MetricDeserializer extends StdDeserializer<Metric> implements ResolvableDeserializer {
+
+	private static final Logger logger = LoggerFactory.getLogger(MetricDeserializer.class.getName());
 
 	private static final long serialVersionUID = 1L;
 
@@ -53,13 +57,14 @@ public class MetricDeserializer extends StdDeserializer<Metric> implements Resol
 		Metric metric = (Metric) defaultDeserializer.deserialize(parser, ctxt);
 
 		// Check if the data type is a File
-		if (metric.getDataType().equals(MetricDataType.File)) {
+		if (MetricDataType.File.equals(metric.getDataType())) {
 			// Perform the custom logic for File types by building up the File object.
 			MetaData metaData = metric.getMetaData();
 			String fileName = metaData == null ? null : metaData.getFileName();
 			File file = new File(fileName, Base64.getDecoder().decode((String) metric.getValue()));
 			metric.setValue(file);
 		}
+
 		return metric;
 	}
 

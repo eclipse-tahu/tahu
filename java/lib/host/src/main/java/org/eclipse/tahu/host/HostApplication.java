@@ -1,5 +1,5 @@
 /********************************************************************************
- * Copyright (c) 2022 Cirrus Link Solutions and others
+ * Copyright (c) 2022-2025 Cirrus Link Solutions and others
  *
  * This program and the accompanying materials are made available under the
  * terms of the Eclipse Public License 2.0 which is available at
@@ -19,7 +19,7 @@ import java.util.Map;
 
 import org.eclipse.tahu.exception.TahuErrorCode;
 import org.eclipse.tahu.exception.TahuException;
-import org.eclipse.tahu.host.api.HostApplicationEventHandler;
+import org.eclipse.tahu.host.api.MultiHostApplicationEventHandler;
 import org.eclipse.tahu.host.seq.SequenceReorderManager;
 import org.eclipse.tahu.message.PayloadDecoder;
 import org.eclipse.tahu.message.SparkplugBPayloadEncoder;
@@ -48,9 +48,10 @@ public class HostApplication implements CommandPublisher {
 	private final List<MqttServerDefinition> mqttServerDefinitions;
 	private final Map<MqttServerName, TahuClient> tahuClients = new HashMap<>();
 
-	public HostApplication(HostApplicationEventHandler eventHandler, String hostId, List<String> sparkplugSubscriptons,
-			List<MqttServerDefinition> mqttServerDefinitions, RandomStartupDelay randomStartupDelay,
-			PayloadDecoder<SparkplugBPayload> payloadDecoder, boolean onlineState) {
+	public HostApplication(MultiHostApplicationEventHandler eventHandler, String hostId,
+			List<String> sparkplugSubscriptons, List<MqttServerDefinition> mqttServerDefinitions,
+			RandomStartupDelay randomStartupDelay, PayloadDecoder<SparkplugBPayload> payloadDecoder,
+			boolean onlineState) {
 		logger.info("Creating the Host Application");
 
 		if (hostId != null) {
@@ -70,9 +71,9 @@ public class HostApplication implements CommandPublisher {
 				new TahuHostCallback(eventHandler, this, sequenceReorderManager, payloadDecoder, hostId, onlineState);
 	}
 
-	public HostApplication(HostApplicationEventHandler eventHandler, String hostId, List<String> sparkplugSubscriptons,
-			TahuHostCallback tahuHostCallback, Map<MqttServerName, TahuClient> tahuClients,
-			RandomStartupDelay randomStartupDelay) {
+	public HostApplication(MultiHostApplicationEventHandler eventHandler, String hostId,
+			List<String> sparkplugSubscriptons, TahuHostCallback tahuHostCallback,
+			Map<MqttServerName, TahuClient> tahuClients, RandomStartupDelay randomStartupDelay) {
 		logger.info("Creating the Host Application");
 
 		if (hostId != null && !hostId.trim().isEmpty()) {

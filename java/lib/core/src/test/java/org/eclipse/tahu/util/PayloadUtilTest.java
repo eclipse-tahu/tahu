@@ -24,6 +24,7 @@ import org.eclipse.tahu.message.model.Metric.MetricBuilder;
 import org.eclipse.tahu.message.model.MetricDataType;
 import org.eclipse.tahu.message.model.SparkplugBPayload;
 import org.eclipse.tahu.message.model.SparkplugBPayload.SparkplugBPayloadBuilder;
+import org.eclipse.tahu.message.model.Template;
 import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
@@ -90,5 +91,54 @@ public class PayloadUtilTest {
 			assertThat(decompressedMetric.getDataType()).isEqualTo(metric.getDataType());
 		}
 
+	}
+
+	@DataProvider
+	public Object[][] jsonDeserializeData() throws Exception {
+		return new Object[][] { { "{\n" + "  \"timestamp\" : 1766420430879,\n" + "  \"metrics\" : [ {\n"
+				+ "    \"name\" : \"Test UDT\",\n" + "    \"timestamp\" : 1766420430878,\n"
+				+ "    \"dataType\" : \"Template\",\n" + "    \"metaData\" : {\n"
+				+ "      \"md5\" : \"a6254ee7db0ae8bd854d4eb296aa78ee\"\n" + "    },\n" + "    \"value\" : {\n"
+				+ "      \"isDefinition\" : true,\n" + "      \"metrics\" : [ {\n"
+				+ "        \"name\" : \"UDTOPCTag\",\n" + "        \"timestamp\" : 1766420429756,\n"
+				+ "        \"dataType\" : \"Int32\",\n" + "        \"metaData\" : { },\n" + "        \"value\" : null\n"
+				+ "      }, {\n" + "        \"name\" : \"UDTMemoryTag\",\n" + "        \"timestamp\" : 1766420429757,\n"
+				+ "        \"dataType\" : \"Int32\",\n" + "        \"metaData\" : { },\n" + "        \"value\" : null\n"
+				+ "      } ]\n" + "    }\n" + "  }, {\n" + "    \"name\" : \"Node Control/Next Server\",\n"
+				+ "    \"timestamp\" : 1766420430881,\n" + "    \"dataType\" : \"Boolean\",\n"
+				+ "    \"properties\" : {\n" + "      \"documentation\" : {\n" + "        \"type\" : \"String\",\n"
+				+ "        \"value\" : \"Writeable tag to request the Edge Node to walk to the next MQTT server\"\n"
+				+ "      }\n" + "    },\n" + "    \"value\" : false\n" + "  }, {\n"
+				+ "    \"name\" : \"Node Info/Transmission Version\",\n" + "    \"timestamp\" : 1766420430881,\n"
+				+ "    \"dataType\" : \"String\",\n" + "    \"properties\" : {\n" + "      \"documentation\" : {\n"
+				+ "        \"type\" : \"String\",\n"
+				+ "        \"value\" : \"The version of MQTT Transmission installed at the Edge Node\"\n" + "      }\n"
+				+ "    },\n" + "    \"value\" : \"4.0.33-SNAPSHOT (b2025121922)\"\n" + "  }, {\n"
+				+ "    \"name\" : \"bdSeq\",\n" + "    \"timestamp\" : 1766420430880,\n"
+				+ "    \"dataType\" : \"Int64\",\n" + "    \"value\" : 135\n" + "  }, {\n"
+				+ "    \"name\" : \"Node Control/Rebirth\",\n" + "    \"timestamp\" : 1766420430881,\n"
+				+ "    \"dataType\" : \"Boolean\",\n" + "    \"properties\" : {\n" + "      \"documentation\" : {\n"
+				+ "        \"type\" : \"String\",\n"
+				+ "        \"value\" : \"Writeable tag to request the Edge Node to resend its cached NBIRTH and DBIRTH messages without disconnecting or sending DEATH messages first\"\n"
+				+ "      }\n" + "    },\n" + "    \"value\" : false\n" + "  } ],\n" + "  \"seq\" : 0\n" + "}" },
+				{ "{\"timestamp\":1766508645412,\"metrics\":[{\"name\":\"M1\",\"timestamp\":1766508643756,\"dataType\":\"Template\",\"value\":{\"reference\":\"Test UDT\",\"isDefinition\":false,\"metrics\":[{\"name\":\"UDTOPCTag\",\"timestamp\":1766508643756,\"dataType\":\"Int32\",\"value\":7}]}}],\"seq\":11}" } };
+	}
+
+	@Test(
+			dataProvider = "jsonDeserializeData")
+	public void testJsonDeserialize(String jsonPayload) throws Exception {
+		SparkplugBPayload sparkplugPayload = PayloadUtil.fromJsonString(jsonPayload);
+
+		for (Metric metric : sparkplugPayload.getMetrics()) {
+			if (MetricDataType.Template.equals(metric.getDataType())) {
+				System.out.println("Template: " + metric.getDataType());
+			}
+
+			if (MetricDataType.Template.equals(metric.getDataType()) && ((Template) metric.getValue()).isDefinition()) {
+				System.out.println("Valid type and definition? " + ((Template) metric.getValue()).isDefinition());
+			}
+		}
+
+		System.out.println("sparkplugPayload: " + sparkplugPayload);
 	}
 }

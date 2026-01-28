@@ -19,6 +19,8 @@ import java.util.List;
 
 import org.eclipse.tahu.SparkplugException;
 import org.eclipse.tahu.message.model.Metric.MetricBuilder;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import com.fasterxml.jackson.annotation.JsonGetter;
 import com.fasterxml.jackson.annotation.JsonInclude;
@@ -31,6 +33,8 @@ import com.fasterxml.jackson.annotation.JsonSetter;
  */
 @JsonInclude(Include.NON_NULL)
 public class Template {
+
+	private static Logger logger = LoggerFactory.getLogger(Template.class.getName());
 
 	/**
 	 * The Template version.

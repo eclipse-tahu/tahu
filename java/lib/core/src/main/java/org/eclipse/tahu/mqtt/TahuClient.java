@@ -13,6 +13,7 @@
 
 package org.eclipse.tahu.mqtt;
 
+import java.net.URI;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -34,7 +35,6 @@ import org.eclipse.paho.client.mqttv3.MqttConnectOptions;
 import org.eclipse.paho.client.mqttv3.MqttException;
 import org.eclipse.paho.client.mqttv3.MqttMessage;
 import org.eclipse.paho.client.mqttv3.MqttSecurityException;
-import org.eclipse.paho.client.mqttv3.internal.NetworkModuleService;
 import org.eclipse.tahu.exception.TahuErrorCode;
 import org.eclipse.tahu.exception.TahuException;
 import org.eclipse.tahu.message.model.StatePayload;
@@ -702,7 +702,7 @@ public class TahuClient implements MqttCallbackExtended {
 	 */
 	public void connect() {
 		try {
-			NetworkModuleService.validateURI(mqttServerUrl.getMqttServerUrl());
+			new URI(mqttServerUrl.getMqttServerUrl());
 		} catch (Exception e) {
 			logger.error("{}: Invalid MQTT Server URL: {}", getClientId(), mqttServerUrl.getMqttServerUrl());
 			return;

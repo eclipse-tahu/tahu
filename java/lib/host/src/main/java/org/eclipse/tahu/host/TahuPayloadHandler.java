@@ -1,5 +1,5 @@
 /********************************************************************************
- * Copyright (c) 2022 Cirrus Link Solutions and others
+ * Copyright (c) 2022-2025 Cirrus Link Solutions and others
  *
  * This program and the accompanying materials are made available under the
  * terms of the Eclipse Public License 2.0 which is available at
@@ -24,7 +24,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import org.eclipse.paho.client.mqttv3.MqttMessage;
 import org.eclipse.tahu.exception.TahuErrorCode;
 import org.eclipse.tahu.exception.TahuException;
-import org.eclipse.tahu.host.api.HostApplicationEventHandler;
+import org.eclipse.tahu.host.api.MultiHostApplicationEventHandler;
 import org.eclipse.tahu.host.manager.EdgeNodeManager;
 import org.eclipse.tahu.host.manager.MetricManager;
 import org.eclipse.tahu.host.manager.SparkplugDevice;
@@ -55,13 +55,13 @@ public class TahuPayloadHandler {
 
 	private static Map<EdgeNodeDescriptor, Timer> rebirthTimers = new ConcurrentHashMap<>();
 
-	private final HostApplicationEventHandler eventHandler;
+	private final MultiHostApplicationEventHandler eventHandler;
 
 	private final CommandPublisher commandPublisher;
 
 	private final PayloadDecoder<SparkplugBPayload> payloadDecoder;
 
-	public TahuPayloadHandler(HostApplicationEventHandler eventHandler, CommandPublisher commandPublisher,
+	public TahuPayloadHandler(MultiHostApplicationEventHandler eventHandler, CommandPublisher commandPublisher,
 			PayloadDecoder<SparkplugBPayload> payloadDecoder) {
 		this.eventHandler = eventHandler;
 		this.commandPublisher = commandPublisher;
@@ -129,27 +129,27 @@ public class TahuPayloadHandler {
 			switch (type) {
 				case NBIRTH:
 					logger.info("Handling NBIRTH from {}", topic.getSparkplugDescriptor());
-					handleNodeBirth(messageContext);
+					handleNodeBirth(mqttServerName, messageContext);
 					break;
 				case DBIRTH:
 					logger.info("Handling DBIRTH from {}", topic.getSparkplugDescriptor());
-					handleDeviceBirth(messageContext);
+					handleDeviceBirth(mqttServerName, messageContext);
 					break;
 				case NDATA:
 					logger.info("Handling NDATA from {}", topic.getSparkplugDescriptor());
-					handleNodeData(messageContext);
+					handleNodeData(mqttServerName, messageContext);
 					break;
 				case DDATA:
 					logger.info("Handling DDATA from {}", topic.getSparkplugDescriptor());
-					handleDeviceData(messageContext);
+					handleDeviceData(mqttServerName, messageContext);
 					break;
 				case NDEATH:
 					logger.info("Handling NDEATH from {}", topic.getSparkplugDescriptor());
-					handleNodeDeath(messageContext);
+					handleNodeDeath(mqttServerName, messageContext);
 					break;
 				case DDEATH:
 					logger.info("Handling DDEATH from {}", topic.getSparkplugDescriptor());
-					handleDeviceDeath(messageContext);
+					handleDeviceDeath(mqttServerName, messageContext);
 					break;
 
 				default:
@@ -161,7 +161,7 @@ public class TahuPayloadHandler {
 		}
 	}
 
-	protected void handleNodeBirth(MessageContext messageContext) throws Exception {
+	protected void handleNodeBirth(MqttServerName mqttServerName, MessageContext messageContext) throws Exception {
 		logger.debug("Processing NBIRTH from Edge Node {} with Seq# {}",
 				messageContext.getTopic().getEdgeNodeDescriptor(), messageContext.getSeqNum());
 		EdgeNodeDescriptor edgeNodeDescriptor = messageContext.getTopic().getEdgeNodeDescriptor();
@@ -183,8 +183,8 @@ public class TahuPayloadHandler {
 		sparkplugEdgeNode.setOnline(true, messageContext.getPayload().getTimestamp(),
 				SparkplugUtil.getBdSequenceNumber(messageContext.getPayload()), messageContext.getSeqNum());
 
-		eventHandler.onNodeBirthArrived(edgeNodeDescriptor, messageContext.getMessage());
-		eventHandler.onMessage(edgeNodeDescriptor, messageContext.getMessage());
+		eventHandler.onNodeBirthArrived(mqttServerName, edgeNodeDescriptor, messageContext.getMessage());
+		eventHandler.onMessage(mqttServerName, edgeNodeDescriptor, messageContext.getMessage());
 		for (Metric metric : messageContext.getPayload().getMetrics()) {
 			if (metric.hasAlias()) {
 				// Make sure the alias doesn't already exist
@@ -206,12 +206,12 @@ public class TahuPayloadHandler {
 
 			// Update the cache and notify
 			sparkplugEdgeNode.putMetric(metric.getName(), new HostMetric(metric, false));
-			eventHandler.onBirthMetric(edgeNodeDescriptor, metric);
+			eventHandler.onBirthMetric(mqttServerName, edgeNodeDescriptor, metric);
 		}
-		eventHandler.onNodeBirthComplete(edgeNodeDescriptor);
+		eventHandler.onNodeBirthComplete(mqttServerName, edgeNodeDescriptor);
 	}
 
-	protected void handleDeviceBirth(MessageContext messageContext) throws Exception {
+	protected void handleDeviceBirth(MqttServerName mqttServerName, MessageContext messageContext) throws Exception {
 		logger.debug("Processing DBIRTH from Device {} with Seq# {}",
 				messageContext.getTopic().getSparkplugDescriptor(), messageContext.getSeqNum());
 		EdgeNodeDescriptor edgeNodeDescriptor = messageContext.getTopic().getEdgeNodeDescriptor();
@@ -231,8 +231,8 @@ public class TahuPayloadHandler {
 		// Set online
 		sparkplugDevice.setOnline(true, messageContext.getPayload().getTimestamp());
 
-		eventHandler.onDeviceBirthArrived(deviceDescriptor, messageContext.getMessage());
-		eventHandler.onMessage(deviceDescriptor, messageContext.getMessage());
+		eventHandler.onDeviceBirthArrived(mqttServerName, deviceDescriptor, messageContext.getMessage());
+		eventHandler.onMessage(mqttServerName, deviceDescriptor, messageContext.getMessage());
 		HostApplicationMetricMap hostApplicationMetricMap = HostApplicationMetricMap.getInstance();
 		for (Metric metric : messageContext.getPayload().getMetrics()) {
 			if (metric.hasAlias()) {
@@ -253,12 +253,12 @@ public class TahuPayloadHandler {
 
 			// Update the cache and notify
 			sparkplugDevice.putMetric(metric.getName(), new HostMetric(metric, false));
-			eventHandler.onBirthMetric(deviceDescriptor, metric);
+			eventHandler.onBirthMetric(mqttServerName, deviceDescriptor, metric);
 		}
-		eventHandler.onDeviceBirthComplete(deviceDescriptor);
+		eventHandler.onDeviceBirthComplete(mqttServerName, deviceDescriptor);
 	}
 
-	protected void handleNodeData(MessageContext messageContext) throws Exception {
+	protected void handleNodeData(MqttServerName mqttServerName, MessageContext messageContext) throws Exception {
 		logger.debug("Processing NDATA from Edge Node {} with Seq# {}",
 				messageContext.getTopic().getEdgeNodeDescriptor(), messageContext.getSeqNum());
 		EdgeNodeDescriptor edgeNodeDescriptor = messageContext.getTopic().getEdgeNodeDescriptor();
@@ -274,8 +274,8 @@ public class TahuPayloadHandler {
 
 		sparkplugEdgeNode.handleSeq(messageContext.getPayload().getSeq());
 
-		eventHandler.onNodeDataArrived(edgeNodeDescriptor, messageContext.getMessage());
-		eventHandler.onMessage(edgeNodeDescriptor, messageContext.getMessage());
+		eventHandler.onNodeDataArrived(mqttServerName, edgeNodeDescriptor, messageContext.getMessage());
+		eventHandler.onMessage(mqttServerName, edgeNodeDescriptor, messageContext.getMessage());
 		for (Metric metric : messageContext.getPayload().getMetrics()) {
 			if (!metric.hasName() && metric.hasAlias()) {
 				metric.setName(HostApplicationMetricMap.getInstance().getMetricName(edgeNodeDescriptor,
@@ -284,12 +284,12 @@ public class TahuPayloadHandler {
 
 			// Update the metric in the cache and notify
 			sparkplugEdgeNode.updateValue(metric.getName(), metric.getValue());
-			eventHandler.onDataMetric(edgeNodeDescriptor, metric);
+			eventHandler.onDataMetric(mqttServerName, edgeNodeDescriptor, metric);
 		}
-		eventHandler.onNodeDataArrived(edgeNodeDescriptor, messageContext.getMessage());
+		eventHandler.onNodeDataArrived(mqttServerName, edgeNodeDescriptor, messageContext.getMessage());
 	}
 
-	protected void handleDeviceData(MessageContext messageContext) throws Exception {
+	protected void handleDeviceData(MqttServerName mqttServerName, MessageContext messageContext) throws Exception {
 		logger.debug("Processing DDATA from Device {} with Seq# {}", messageContext.getTopic().getSparkplugDescriptor(),
 				messageContext.getSeqNum());
 		EdgeNodeDescriptor edgeNodeDescriptor = messageContext.getTopic().getEdgeNodeDescriptor();
@@ -307,8 +307,8 @@ public class TahuPayloadHandler {
 
 		sparkplugEdgeNode.handleSeq(messageContext.getPayload().getSeq());
 
-		eventHandler.onDeviceDataArrived(deviceDescriptor, messageContext.getMessage());
-		eventHandler.onMessage(deviceDescriptor, messageContext.getMessage());
+		eventHandler.onDeviceDataArrived(mqttServerName, deviceDescriptor, messageContext.getMessage());
+		eventHandler.onMessage(mqttServerName, deviceDescriptor, messageContext.getMessage());
 		for (Metric metric : messageContext.getPayload().getMetrics()) {
 			if (!metric.hasName() && metric.hasAlias()) {
 				metric.setName(HostApplicationMetricMap.getInstance().getMetricName(edgeNodeDescriptor,
@@ -317,12 +317,12 @@ public class TahuPayloadHandler {
 
 			// Update the metric in the cache and notify
 			sparkplugDevice.updateValue(metric.getName(), metric.getValue());
-			eventHandler.onDataMetric(deviceDescriptor, metric);
+			eventHandler.onDataMetric(mqttServerName, deviceDescriptor, metric);
 		}
-		eventHandler.onDeviceDataComplete(deviceDescriptor);
+		eventHandler.onDeviceDataComplete(mqttServerName, deviceDescriptor);
 	}
 
-	protected void handleNodeDeath(MessageContext messageContext) {
+	protected void handleNodeDeath(MqttServerName mqttServerName, MessageContext messageContext) {
 		Long incomingBdSeqNum = -1L;
 		EdgeNodeDescriptor edgeNodeDescriptor = messageContext.getTopic().getEdgeNodeDescriptor();
 		try {
@@ -333,16 +333,16 @@ public class TahuPayloadHandler {
 				if (sparkplugEdgeNode.isOnline()) {
 					long birthBdSeqNum = sparkplugEdgeNode.getBirthBdSeqNum();
 					if (birthBdSeqNum == incomingBdSeqNum) {
-						eventHandler.onNodeDeath(edgeNodeDescriptor, messageContext.getMessage());
-						eventHandler.onMessage(edgeNodeDescriptor, messageContext.getMessage());
-						staleTags(edgeNodeDescriptor, sparkplugEdgeNode);
+						eventHandler.onNodeDeath(mqttServerName, edgeNodeDescriptor, messageContext.getMessage());
+						eventHandler.onMessage(mqttServerName, edgeNodeDescriptor, messageContext.getMessage());
+						staleTags(mqttServerName, edgeNodeDescriptor, sparkplugEdgeNode);
 						sparkplugEdgeNode.setOnline(false, messageContext.getPayload().getTimestamp(), incomingBdSeqNum,
 								null);
 						for (SparkplugDevice sparkplugDevice : sparkplugEdgeNode.getSparkplugDevices().values()) {
-							staleTags(sparkplugDevice.getDeviceDescrptor(), sparkplugDevice);
+							staleTags(mqttServerName, sparkplugDevice.getDeviceDescrptor(), sparkplugDevice);
 							sparkplugDevice.setOnline(false, messageContext.getPayload().getTimestamp());
 						}
-						eventHandler.onNodeDeathComplete(edgeNodeDescriptor);
+						eventHandler.onNodeDeathComplete(mqttServerName, edgeNodeDescriptor);
 					} else {
 						logger.error(
 								"Edge Node bdSeq number mismatch on incoming NDEATH from {} - received {}, expected {} - ignoring NDEATH",
@@ -360,7 +360,8 @@ public class TahuPayloadHandler {
 		}
 	}
 
-	protected void handleDeviceDeath(MessageContext messageContext) throws TahuException {
+	protected void handleDeviceDeath(MqttServerName mqttServerName, MessageContext messageContext)
+			throws TahuException {
 		EdgeNodeDescriptor edgeNodeDescriptor = messageContext.getTopic().getEdgeNodeDescriptor();
 		DeviceDescriptor deviceDescriptor = (DeviceDescriptor) messageContext.getTopic().getSparkplugDescriptor();
 		SparkplugEdgeNode sparkplugEdgeNode = EdgeNodeManager.getInstance().getSparkplugEdgeNode(edgeNodeDescriptor);
@@ -375,11 +376,11 @@ public class TahuPayloadHandler {
 		sparkplugEdgeNode.handleSeq(messageContext.getPayload().getSeq());
 
 		if (sparkplugEdgeNode.isOnline() && sparkplugDevice.isOnline()) {
-			eventHandler.onDeviceDeath(deviceDescriptor, messageContext.getMessage());
-			eventHandler.onMessage(deviceDescriptor, messageContext.getMessage());
-			staleTags(deviceDescriptor, sparkplugDevice);
+			eventHandler.onDeviceDeath(mqttServerName, deviceDescriptor, messageContext.getMessage());
+			eventHandler.onMessage(mqttServerName, deviceDescriptor, messageContext.getMessage());
+			staleTags(mqttServerName, deviceDescriptor, sparkplugDevice);
 			sparkplugDevice.setOnline(false, messageContext.getPayload().getTimestamp());
-			eventHandler.onDeviceDeathComplete(deviceDescriptor);
+			eventHandler.onDeviceDeathComplete(mqttServerName, deviceDescriptor);
 		} else {
 			logger.error("Online requirements not met for {} - edgeNode={} and device={} - ignoring DDEATH",
 					deviceDescriptor, sparkplugEdgeNode.isOnline() ? "online" : "offline",
@@ -387,7 +388,8 @@ public class TahuPayloadHandler {
 		}
 	}
 
-	private void staleTags(SparkplugDescriptor sparkplugDescriptor, MetricManager metricManager) {
+	private void staleTags(MqttServerName mqttServerName, SparkplugDescriptor sparkplugDescriptor,
+			MetricManager metricManager) {
 		// Stale all tags associated with this Edge Node
 		Set<String> metricNames = metricManager.getMetricNames();
 		Iterator<String> it = metricNames.iterator();
@@ -396,7 +398,7 @@ public class TahuPayloadHandler {
 
 			// Update the cache and notify
 			metricManager.setStale(metricName, true);
-			eventHandler.onStale(sparkplugDescriptor, metricManager.getMetric(metricName));
+			eventHandler.onStale(mqttServerName, sparkplugDescriptor, metricManager.getMetric(metricName));
 		}
 	}
 

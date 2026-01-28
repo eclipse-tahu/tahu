@@ -18,7 +18,7 @@ import java.util.Arrays;
 import java.util.List;
 
 import org.eclipse.tahu.exception.TahuException;
-import org.eclipse.tahu.host.api.HostApplicationEventHandler;
+import org.eclipse.tahu.host.api.MultiHostApplicationEventHandler;
 import org.eclipse.tahu.message.SparkplugBPayloadDecoder;
 import org.eclipse.tahu.message.model.DeviceDescriptor;
 import org.eclipse.tahu.message.model.EdgeNodeDescriptor;
@@ -33,7 +33,7 @@ import org.eclipse.tahu.mqtt.MqttServerUrl;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-public class SparkplugHostApplication implements HostApplicationEventHandler {
+public class SparkplugHostApplication implements MultiHostApplicationEventHandler {
 
 	private static Logger logger = LoggerFactory.getLogger(SparkplugHostApplication.class.getName());
 
@@ -120,91 +120,91 @@ public class SparkplugHostApplication implements HostApplicationEventHandler {
 	}
 
 	@Override
-	public void onConnect() {
+	public void onConnect(MqttServerName serverName) {
 		logger.info("onConnect...");
 	}
 
 	@Override
-	public void onDisconnect() {
+	public void onDisconnect(MqttServerName serverName) {
 		logger.info("onDisconnect...");
 	}
 
 	@Override
-	public void onNodeBirthArrived(EdgeNodeDescriptor edgeNodeDescriptor, Message message) {
+	public void onNodeBirthArrived(MqttServerName serverName, EdgeNodeDescriptor edgeNodeDescriptor, Message message) {
 		logger.info("onNodeBirthArrived from {}...", edgeNodeDescriptor);
 	}
 
 	@Override
-	public void onNodeBirthComplete(EdgeNodeDescriptor edgeNodeDescriptor) {
+	public void onNodeBirthComplete(MqttServerName serverName, EdgeNodeDescriptor edgeNodeDescriptor) {
 		logger.info("onNodeBirthComplete from {}...", edgeNodeDescriptor);
 	}
 
 	@Override
-	public void onNodeDataArrived(EdgeNodeDescriptor edgeNodeDescriptor, Message message) {
+	public void onNodeDataArrived(MqttServerName serverName, EdgeNodeDescriptor edgeNodeDescriptor, Message message) {
 		logger.info("onNodeDataArrived from {}...", edgeNodeDescriptor);
 	}
 
 	@Override
-	public void onNodeDataComplete(EdgeNodeDescriptor edgeNodeDescriptor) {
+	public void onNodeDataComplete(MqttServerName serverName, EdgeNodeDescriptor edgeNodeDescriptor) {
 		logger.info("onNodeDataComplete from {}...", edgeNodeDescriptor);
 	}
 
 	@Override
-	public void onNodeDeath(EdgeNodeDescriptor edgeNodeDescriptor, Message message) {
+	public void onNodeDeath(MqttServerName serverName, EdgeNodeDescriptor edgeNodeDescriptor, Message message) {
 		logger.info("onNodeDeath from {}...", edgeNodeDescriptor);
 	}
 
 	@Override
-	public void onNodeDeathComplete(EdgeNodeDescriptor edgeNodeDescriptor) {
+	public void onNodeDeathComplete(MqttServerName serverName, EdgeNodeDescriptor edgeNodeDescriptor) {
 		logger.info("onNodeDeathComplete from {}...", edgeNodeDescriptor);
 	}
 
 	@Override
-	public void onDeviceBirthArrived(DeviceDescriptor deviceDescriptor, Message message) {
+	public void onDeviceBirthArrived(MqttServerName serverName, DeviceDescriptor deviceDescriptor, Message message) {
 		logger.info("onDeviceBirthArrived from {}...", deviceDescriptor);
 	}
 
 	@Override
-	public void onDeviceBirthComplete(DeviceDescriptor deviceDescriptor) {
+	public void onDeviceBirthComplete(MqttServerName serverName, DeviceDescriptor deviceDescriptor) {
 		logger.info("onDeviceBirthComplete from {}...", deviceDescriptor);
 	}
 
 	@Override
-	public void onDeviceDataArrived(DeviceDescriptor deviceDescriptor, Message message) {
+	public void onDeviceDataArrived(MqttServerName serverName, DeviceDescriptor deviceDescriptor, Message message) {
 		logger.info("onDeviceDataArrived from {}...", deviceDescriptor);
 	}
 
 	@Override
-	public void onDeviceDataComplete(DeviceDescriptor deviceDescriptor) {
+	public void onDeviceDataComplete(MqttServerName serverName, DeviceDescriptor deviceDescriptor) {
 		logger.info("onDeviceDataComplete from {}...", deviceDescriptor);
 	}
 
 	@Override
-	public void onDeviceDeath(DeviceDescriptor deviceDescriptor, Message message) {
+	public void onDeviceDeath(MqttServerName serverName, DeviceDescriptor deviceDescriptor, Message message) {
 		logger.info("onDeviceDeath from {}...", deviceDescriptor);
 	}
 
 	@Override
-	public void onDeviceDeathComplete(DeviceDescriptor deviceDescriptor) {
+	public void onDeviceDeathComplete(MqttServerName serverName, DeviceDescriptor deviceDescriptor) {
 		logger.info("onDeviceDeathComplete from {}...", deviceDescriptor);
 	}
 
 	@Override
-	public void onBirthMetric(SparkplugDescriptor sparkplugDescriptor, Metric metric) {
+	public void onBirthMetric(MqttServerName serverName, SparkplugDescriptor sparkplugDescriptor, Metric metric) {
 		logger.info("onBirthMetric from {} with metric={}...", sparkplugDescriptor, metric);
 	}
 
 	@Override
-	public void onDataMetric(SparkplugDescriptor sparkplugDescriptor, Metric metric) {
+	public void onDataMetric(MqttServerName serverName, SparkplugDescriptor sparkplugDescriptor, Metric metric) {
 		logger.info("onDataMetric from {} with metric={}...", sparkplugDescriptor, metric);
 	}
 
-	public void onStale(SparkplugDescriptor sparkplugDescriptor, Metric metric) {
+	public void onStale(MqttServerName serverName, SparkplugDescriptor sparkplugDescriptor, Metric metric) {
 		logger.info("onStale from {} for {}...", sparkplugDescriptor, metric.getName());
 	}
 
 	@Override
-	public void onMessage(SparkplugDescriptor sparkplugDescriptor, Message message) {
+	public void onMessage(MqttServerName serverName, SparkplugDescriptor sparkplugDescriptor, Message message) {
 		logger.info("onMessage from {} with message={}...", sparkplugDescriptor, message);
 	}
 }

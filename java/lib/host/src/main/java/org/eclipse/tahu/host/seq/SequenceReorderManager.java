@@ -1,5 +1,5 @@
 /********************************************************************************
- * Copyright (c) 2022 Cirrus Link Solutions and others
+ * Copyright (c) 2022-2025 Cirrus Link Solutions and others
  *
  * This program and the accompanying materials are made available under the
  * terms of the Eclipse Public License 2.0 which is available at
@@ -25,7 +25,7 @@ import org.eclipse.tahu.SparkplugParsingException;
 import org.eclipse.tahu.host.CommandPublisher;
 import org.eclipse.tahu.host.TahuHostCallback;
 import org.eclipse.tahu.host.TahuPayloadHandler;
-import org.eclipse.tahu.host.api.HostApplicationEventHandler;
+import org.eclipse.tahu.host.api.MultiHostApplicationEventHandler;
 import org.eclipse.tahu.host.manager.EdgeNodeManager;
 import org.eclipse.tahu.host.manager.SparkplugEdgeNode;
 import org.eclipse.tahu.host.model.HostApplicationMetricMap;
@@ -54,7 +54,7 @@ public class SequenceReorderManager {
 
 	private Timer timer;
 
-	private HostApplicationEventHandler eventHandler;
+	private MultiHostApplicationEventHandler eventHandler;
 
 	private CommandPublisher commandPublisher;
 
@@ -62,7 +62,7 @@ public class SequenceReorderManager {
 
 	private Long timeout;
 
-	private SequenceReorderManager() {
+	public SequenceReorderManager() {
 		this.edgeNodeMap = new ConcurrentHashMap<>();
 	}
 
@@ -73,13 +73,13 @@ public class SequenceReorderManager {
 		return instance;
 	}
 
-	public void init(HostApplicationEventHandler eventHandler, CommandPublisher commandPublisher,
+	public void init(MultiHostApplicationEventHandler eventHandler, CommandPublisher commandPublisher,
 			PayloadDecoder<SparkplugBPayload> payloadDecoder, Long timeout) {
 		if (eventHandler != null && timeout != null) {
-			instance.eventHandler = eventHandler;
-			instance.commandPublisher = commandPublisher;
-			instance.payloadDecoder = payloadDecoder;
-			instance.timeout = timeout;
+			this.eventHandler = eventHandler;
+			this.commandPublisher = commandPublisher;
+			this.payloadDecoder = payloadDecoder;
+			this.timeout = timeout;
 		} else {
 			logger.error("Not re-initializing the SequenceReorderManager timer");
 		}

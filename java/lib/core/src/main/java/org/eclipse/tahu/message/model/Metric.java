@@ -36,6 +36,9 @@ import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonInclude.Include;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.annotation.JsonSetter;
+import com.fasterxml.jackson.annotation.JsonSubTypes;
+import com.fasterxml.jackson.annotation.JsonTypeInfo;
+import com.fasterxml.jackson.annotation.JsonTypeInfo.As;
 
 /**
  * A metric of a Sparkplug Payload.
@@ -75,6 +78,111 @@ public class Metric {
 
 	@JsonProperty("value")
 	@JsonInclude(Include.ALWAYS)
+
+	@JsonTypeInfo(
+			use = JsonTypeInfo.Id.NAME,
+			include = As.EXTERNAL_PROPERTY,
+			property = "dataType",
+			visible = true)
+	@JsonSubTypes(
+			value = { @JsonSubTypes.Type(
+					value = Byte.class,
+					name = "Int8"),
+					@JsonSubTypes.Type(
+							value = Short.class,
+							name = "Int16"),
+					@JsonSubTypes.Type(
+							value = Integer.class,
+							name = "Int32"),
+					@JsonSubTypes.Type(
+							value = Long.class,
+							name = "Int64"),
+					@JsonSubTypes.Type(
+							value = Short.class,
+							name = "UInt8"),
+					@JsonSubTypes.Type(
+							value = Integer.class,
+							name = "UInt16"),
+					@JsonSubTypes.Type(
+							value = Long.class,
+							name = "UInt32"),
+					@JsonSubTypes.Type(
+							value = BigInteger.class,
+							name = "UInt64"),
+					@JsonSubTypes.Type(
+							value = Float.class,
+							name = "Float"),
+					@JsonSubTypes.Type(
+							value = Double.class,
+							name = "Double"),
+					@JsonSubTypes.Type(
+							value = Boolean.class,
+							name = "Boolean"),
+					@JsonSubTypes.Type(
+							value = String.class,
+							name = "String"),
+					@JsonSubTypes.Type(
+							value = Date.class,
+							name = "DateTime"),
+					@JsonSubTypes.Type(
+							value = String.class,
+							name = "Text"),
+
+					@JsonSubTypes.Type(
+							value = String.class,
+							name = "UUID"),
+					@JsonSubTypes.Type(
+							value = DataSet.class,
+							name = "DataSet"),
+					@JsonSubTypes.Type(
+							value = byte[].class,
+							name = "Bytes"),
+					@JsonSubTypes.Type(
+							value = File.class,
+							name = "File"),
+					@JsonSubTypes.Type(
+							value = Template.class,
+							name = "Template"),
+
+					@JsonSubTypes.Type(
+							value = Byte[].class,
+							name = "Int8Array"),
+					@JsonSubTypes.Type(
+							value = Short[].class,
+							name = "Int16Array"),
+					@JsonSubTypes.Type(
+							value = Integer[].class,
+							name = "Int32Array"),
+					@JsonSubTypes.Type(
+							value = Long[].class,
+							name = "Int64Array"),
+					@JsonSubTypes.Type(
+							value = Short[].class,
+							name = "UInt8Array"),
+					@JsonSubTypes.Type(
+							value = Integer[].class,
+							name = "UInt16Array"),
+					@JsonSubTypes.Type(
+							value = Long[].class,
+							name = "UInt32Array"),
+					@JsonSubTypes.Type(
+							value = BigInteger[].class,
+							name = "UInt64Array"),
+					@JsonSubTypes.Type(
+							value = Float[].class,
+							name = "FloatArray"),
+					@JsonSubTypes.Type(
+							value = Double[].class,
+							name = "DoubleArray"),
+					@JsonSubTypes.Type(
+							value = Boolean[].class,
+							name = "BooleanArray"),
+					@JsonSubTypes.Type(
+							value = String[].class,
+							name = "StringArray"),
+					@JsonSubTypes.Type(
+							value = Date[].class,
+							name = "DateTimeArray") })
 	private Object value;
 
 	private Boolean isNull = null;

@@ -22,7 +22,7 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
 import org.eclipse.paho.client.mqttv3.MqttMessage;
-import org.eclipse.tahu.host.api.HostApplicationEventHandler;
+import org.eclipse.tahu.host.api.MultiHostApplicationEventHandler;
 import org.eclipse.tahu.host.seq.SequenceReorderManager;
 import org.eclipse.tahu.message.PayloadDecoder;
 import org.eclipse.tahu.message.model.SparkplugBPayload;
@@ -51,7 +51,7 @@ public class TahuHostCallback implements ClientCallback {
 
 	private final boolean enableSequenceReordering;
 
-	private final HostApplicationEventHandler eventHandler;
+	private final MultiHostApplicationEventHandler eventHandler;
 
 	private final CommandPublisher commandPublisher;
 
@@ -63,7 +63,7 @@ public class TahuHostCallback implements ClientCallback {
 
 	private boolean onlineState;
 
-	public TahuHostCallback(HostApplicationEventHandler eventHandler, CommandPublisher commandPublisher,
+	public TahuHostCallback(MultiHostApplicationEventHandler eventHandler, CommandPublisher commandPublisher,
 			SequenceReorderManager sequenceReorderManager, PayloadDecoder<SparkplugBPayload> payloadDecoder,
 			String hostId, boolean onlineState) {
 		this.eventHandler = eventHandler;
@@ -214,7 +214,7 @@ public class TahuHostCallback implements ClientCallback {
 	public void connectionLost(MqttServerName mqttServerName, MqttServerUrl url, MqttClientId clientId,
 			Throwable cause) {
 		logger.warn("Connection Lost to - {} :: {} :: {}", mqttServerName, url, clientId);
-		eventHandler.onDisconnect();
+		eventHandler.onDisconnect(mqttServerName);
 
 		if (cause != null) {
 			// We don't need to see all of the connection lost callbacks for clients
@@ -253,7 +253,7 @@ public class TahuHostCallback implements ClientCallback {
 	public void connectComplete(boolean reconnect, MqttServerName server, MqttServerUrl url, MqttClientId clientId) {
 //		// Update the ONLINE Engine Info tag for the client
 //		updateEngineInfoDateTag(server, DATE_ONLINE);
-		eventHandler.onConnect();
+		eventHandler.onConnect(server);
 	}
 
 	private void updateEngineInfoDateTag(MqttServerName server, String tagName) {

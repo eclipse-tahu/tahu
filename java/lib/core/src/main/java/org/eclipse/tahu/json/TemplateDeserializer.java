@@ -15,6 +15,8 @@ package org.eclipse.tahu.json;
 import java.io.IOException;
 
 import org.eclipse.tahu.message.model.Template;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import com.fasterxml.jackson.core.JacksonException;
 import com.fasterxml.jackson.core.JsonParser;
@@ -28,6 +30,8 @@ import com.fasterxml.jackson.databind.deser.std.StdDeserializer;
  * Defines Template deserializer
  */
 public class TemplateDeserializer extends StdDeserializer<Template> implements ResolvableDeserializer {
+
+	private static Logger logger = LoggerFactory.getLogger(TemplateDeserializer.class.getName());
 
 	private static final long serialVersionUID = 1L;
 

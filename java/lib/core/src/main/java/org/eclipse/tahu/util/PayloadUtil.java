@@ -59,6 +59,7 @@ public class PayloadUtil {
 	 */
 	public static String toJsonString(SparkplugBPayload payload) throws JsonProcessingException {
 		ObjectMapper mapper = new ObjectMapper();
+		mapper.registerModule(new DeserializerModule(new DeserializerModifier()));
 		return mapper.writeValueAsString(payload);
 	}
 

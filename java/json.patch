@@ -1,0 +1,632 @@
+diff --git a/java/lib/core/src/main/java/org/eclipse/tahu/json/DeserializerModifier.java b/java/lib/core/src/main/java/org/eclipse/tahu/json/DeserializerModifier.java
+index ebd4fda..d69fdd0 100644
+--- a/java/lib/core/src/main/java/org/eclipse/tahu/json/DeserializerModifier.java
++++ b/java/lib/core/src/main/java/org/eclipse/tahu/json/DeserializerModifier.java
+@@ -31,7 +31,7 @@ public class DeserializerModifier extends BeanDeserializerModifier {
+ 	public JsonDeserializer<?> modifyDeserializer(DeserializationConfig config, BeanDescription beanDesc,
+ 			JsonDeserializer<?> deserializer) {
+ 		if (Metric.class.equals(beanDesc.getBeanClass())) {
+-			return new MetricDeserializer(deserializer);
++			return new MetricDeserializer();
+ 		} else if (Template.class.equals(beanDesc.getBeanClass())) {
+ 			return new TemplateDeserializer(deserializer);
+ 		} else if (PropertySet.class.equals(beanDesc.getBeanClass())) {
+diff --git a/java/lib/core/src/main/java/org/eclipse/tahu/json/MetricDeserializer.java b/java/lib/core/src/main/java/org/eclipse/tahu/json/MetricDeserializer.java
+index fa205fa..c1c9885 100644
+--- a/java/lib/core/src/main/java/org/eclipse/tahu/json/MetricDeserializer.java
++++ b/java/lib/core/src/main/java/org/eclipse/tahu/json/MetricDeserializer.java
+@@ -14,57 +14,159 @@
+ package org.eclipse.tahu.json;
+ 
+ import java.io.IOException;
+-import java.util.Base64;
++import java.math.BigInteger;
++import java.util.Date;
+ 
+-import org.eclipse.tahu.message.model.File;
+-import org.eclipse.tahu.message.model.MetaData;
++import org.eclipse.tahu.SparkplugInvalidTypeException;
+ import org.eclipse.tahu.message.model.Metric;
+ import org.eclipse.tahu.message.model.MetricDataType;
++import org.eclipse.tahu.message.model.Template;
++import org.slf4j.Logger;
++import org.slf4j.LoggerFactory;
+ 
+ import com.fasterxml.jackson.core.JsonParser;
+-import com.fasterxml.jackson.core.JsonProcessingException;
+ import com.fasterxml.jackson.databind.DeserializationContext;
+-import com.fasterxml.jackson.databind.JsonDeserializer;
+-import com.fasterxml.jackson.databind.JsonMappingException;
+-import com.fasterxml.jackson.databind.deser.ResolvableDeserializer;
++import com.fasterxml.jackson.databind.JsonNode;
+ import com.fasterxml.jackson.databind.deser.std.StdDeserializer;
+ 
+ /**
+  * A custom JSON deserializer for {@link Metric} instances.
+  */
+-public class MetricDeserializer extends StdDeserializer<Metric> implements ResolvableDeserializer {
++public class MetricDeserializer extends StdDeserializer<Metric> {
+ 
+ 	private static final long serialVersionUID = 1L;
+ 
+-	private final JsonDeserializer<?> defaultDeserializer;
++	private static Logger logger = LoggerFactory.getLogger(MetricDeserializer.class.getName());
+ 
+-	/**
+-	 * Constructor.
+-	 */
+-	protected MetricDeserializer(JsonDeserializer<?> defaultDeserializer) {
+-		super(Metric.class);
+-		this.defaultDeserializer = defaultDeserializer;
++	public MetricDeserializer() {
++		this(null);
++	}
++
++	public MetricDeserializer(Class<?> vc) {
++		super(vc);
+ 	}
+ 
+ 	@Override
+-	public Metric deserialize(JsonParser parser, DeserializationContext ctxt)
+-			throws IOException, JsonProcessingException {
+-
+-		Metric metric = (Metric) defaultDeserializer.deserialize(parser, ctxt);
+-
+-		// Check if the data type is a File
+-		if (metric.getDataType().equals(MetricDataType.File)) {
+-			// Perform the custom logic for File types by building up the File object.
+-			MetaData metaData = metric.getMetaData();
+-			String fileName = metaData == null ? null : metaData.getFileName();
+-			File file = new File(fileName, Base64.getDecoder().decode((String) metric.getValue()));
+-			metric.setValue(file);
++	public Metric deserialize(JsonParser jp, DeserializationContext ctxt) throws IOException {
++		JsonNode node = jp.getCodec().readTree(jp);
++
++		// Extract basic fields
++		String name = node.has("name") ? node.get("name").asText() : null;
++		long timestamp = node.has("timestamp") ? node.get("timestamp").asLong() : System.currentTimeMillis();
++
++		// Determine DataType to correctly parse the 'value' field
++		String typeStr = node.get("dataType").asText();
++		MetricDataType dataType = new MetricDataType(typeStr);
++
++		Object value = null;
++		if (node.has("value")) {
++			value = parseValueBasedOnType(jp, node.get("value"), dataType);
++		}
++
++		// Return a new Metric instance (Constructor varies slightly by Tahu version)
++		try {
++			return new Metric.MetricBuilder(name, dataType, value).timestamp(new Date(timestamp)).createMetric();
++		} catch (SparkplugInvalidTypeException e) {
++			logger.info("Failed to build the metric", e);
++			return null;
+ 		}
+-		return metric;
+ 	}
+ 
+-	@Override
+-	public void resolve(DeserializationContext ctxt) throws JsonMappingException {
+-		((ResolvableDeserializer) defaultDeserializer).resolve(ctxt);
++	private Object parseValueBasedOnType(JsonParser jp, JsonNode valueNode, MetricDataType type) {
++//		// Implement logic to convert JsonNode to the specific Java type (Integer, Float, etc.)
++//		return valueNode.asText(); // Placeholder logic
++
++		try {
++			if (MetricDataType.Int8.equals(type)) {
++				return (byte) valueNode.asInt();
++			} else if (MetricDataType.Int16.equals(type)) {
++				return (short) valueNode.asInt();
++			} else if (MetricDataType.Int32.equals(type)) {
++				return valueNode.asInt();
++			} else if (MetricDataType.Int64.equals(type)) {
++				return valueNode.asLong();
++			} else if (MetricDataType.UInt8.equals(type)) {
++				short unsignedValue = (short) valueNode.asInt();
++				return unsignedValue & 0xFFFF;
++			} else if (MetricDataType.UInt16.equals(type)) {
++				int unsignedValue = valueNode.asInt();
++				return unsignedValue & 0xFFFFFFFF;
++			} else if (MetricDataType.UInt32.equals(type)) {
++				long unsignedValue = valueNode.asLong();
++				return unsignedValue & 0xFFFFFFFFFFFFFFFFL;
++			} else if (MetricDataType.UInt64.equals(type)) {
++				return new BigInteger(valueNode.asText());
++			} else if (MetricDataType.Float.equals(type)) {
++				return (float) valueNode.asDouble();
++			} else if (MetricDataType.Double.equals(type)) {
++				return valueNode.asDouble();
++			} else if (MetricDataType.Boolean.equals(type)) {
++				return valueNode.asBoolean();
++			} else if (MetricDataType.String.equals(type)) {
++				return valueNode.asText();
++			} else if (MetricDataType.DateTime.equals(type)) {
++				return jp.readValueAs(Date.class);
++			} else if (MetricDataType.Text.equals(type)) {
++				return valueNode.asText();
++			} else if (MetricDataType.UUID.equals(type)) {
++				return valueNode.asText();
++			} else if (MetricDataType.DataSet.equals(type)) {
++			} else if (MetricDataType.Bytes.equals(type)) {
++			} else if (MetricDataType.File.equals(type)) {
++			} else if (MetricDataType.Template.equals(type)) {
++				return jp.readValueAs(Template.class);
++			} else if (MetricDataType.Int8Array.equals(type)) {
++			} else if (MetricDataType.Int16Array.equals(type)) {
++			} else if (MetricDataType.Int32Array.equals(type)) {
++			} else if (MetricDataType.Int64Array.equals(type)) {
++			} else if (MetricDataType.UInt8Array.equals(type)) {
++			} else if (MetricDataType.UInt16Array.equals(type)) {
++			} else if (MetricDataType.UInt32Array.equals(type)) {
++			} else if (MetricDataType.UInt64Array.equals(type)) {
++			} else if (MetricDataType.FloatArray.equals(type)) {
++			} else if (MetricDataType.DoubleArray.equals(type)) {
++			} else if (MetricDataType.BooleanArray.equals(type)) {
++			} else if (MetricDataType.StringArray.equals(type)) {
++			} else if (MetricDataType.DateTimeArray.equals(type)) {
++			} else if (MetricDataType.Unknown.equals(type)) {
++			} else {
++				logger.error("Failed to parse value for '{}' with value={}", type, valueNode);
++			}
++		} catch (Exception e) {
++			logger.error("Failed to parse value for '{}' with value={}", type, valueNode, e);
++		}
++
++		logger.error("SHOULD NOT GET HERE...");
++		return null;
++
++//		// Basic Types
++//		public static final MetricDataType DateTime = new MetricDataType("DateTime", 13, Date.class);
++//
++//		// Custom Types for Metrics
++//		public static final MetricDataType UUID = new MetricDataType("UUID", 15, String.class);
++//		public static final MetricDataType DataSet = new MetricDataType("DataSet", 16, DataSet.class);
++//		public static final MetricDataType Bytes = new MetricDataType("Bytes", 17, byte[].class);
++//		public static final MetricDataType File = new MetricDataType("File", 18, File.class);
++//		public static final MetricDataType Template = new MetricDataType("Template", 19, Template.class);
++//
++//		// PropertyValue Types (20 and 21) are NOT metric datatypes
++//
++//		// Array Types
++//		public static final MetricDataType Int8Array = new MetricDataType("Int8Array", 22, Byte[].class);
++//		public static final MetricDataType Int16Array = new MetricDataType("Int16Array", 23, Short[].class);
++//		public static final MetricDataType Int32Array = new MetricDataType("Int32Array", 24, Integer[].class);
++//		public static final MetricDataType Int64Array = new MetricDataType("Int64Array", 25, Long[].class);
++//		public static final MetricDataType UInt8Array = new MetricDataType("UInt8Array", 26, Short[].class);
++//		public static final MetricDataType UInt16Array = new MetricDataType("UInt16Array", 27, Integer[].class);
++//		public static final MetricDataType UInt32Array = new MetricDataType("UInt32Array", 28, Long[].class);
++//		public static final MetricDataType UInt64Array = new MetricDataType("UInt64Array", 29, BigInteger[].class);
++//		public static final MetricDataType FloatArray = new MetricDataType("FloatArray", 30, Float[].class);
++//		public static final MetricDataType DoubleArray = new MetricDataType("DoubleArray", 31, Double[].class);
++//		public static final MetricDataType BooleanArray = new MetricDataType("BooleanArray", 32, Boolean[].class);
++//		public static final MetricDataType StringArray = new MetricDataType("StringArray", 33, String[].class);
++//		public static final MetricDataType DateTimeArray = new MetricDataType("DateTimeArray", 34, Date[].class);
++//
++//		// Unknown
++//		public static final MetricDataType Unknown = new MetricDataType("Unknown", 0, Object.class);
+ 	}
+ }
+diff --git a/java/lib/core/src/main/java/org/eclipse/tahu/util/PayloadUtil.java b/java/lib/core/src/main/java/org/eclipse/tahu/util/PayloadUtil.java
+index 5550af2..253196f 100644
+--- a/java/lib/core/src/main/java/org/eclipse/tahu/util/PayloadUtil.java
++++ b/java/lib/core/src/main/java/org/eclipse/tahu/util/PayloadUtil.java
+@@ -23,6 +23,7 @@ import java.util.zip.Inflater;
+ import org.eclipse.tahu.SparkplugException;
+ import org.eclipse.tahu.json.DeserializerModifier;
+ import org.eclipse.tahu.json.DeserializerModule;
++import org.eclipse.tahu.json.MetricDeserializer;
+ import org.eclipse.tahu.message.SparkplugBPayloadDecoder;
+ import org.eclipse.tahu.message.SparkplugBPayloadEncoder;
+ import org.eclipse.tahu.message.model.Metric;
+@@ -38,6 +39,7 @@ import com.fasterxml.jackson.core.JsonParseException;
+ import com.fasterxml.jackson.core.JsonProcessingException;
+ import com.fasterxml.jackson.databind.JsonMappingException;
+ import com.fasterxml.jackson.databind.ObjectMapper;
++import com.fasterxml.jackson.databind.module.SimpleModule;
+ 
+ /**
+  * Utilities for Sparkplug Payload handling.
+@@ -59,6 +61,9 @@ public class PayloadUtil {
+ 	 */
+ 	public static String toJsonString(SparkplugBPayload payload) throws JsonProcessingException {
+ 		ObjectMapper mapper = new ObjectMapper();
++		SimpleModule module = new SimpleModule();
++		module.addDeserializer(Metric.class, new MetricDeserializer());
++		mapper.registerModule(module);
+ 		return mapper.writeValueAsString(payload);
+ 	}
+ 
+diff --git a/java/lib/core/src/test/java/org/eclipse/tahu/util/PayloadUtilTest.java b/java/lib/core/src/test/java/org/eclipse/tahu/util/PayloadUtilTest.java
+index c733def..a4c6e3e 100644
+--- a/java/lib/core/src/test/java/org/eclipse/tahu/util/PayloadUtilTest.java
++++ b/java/lib/core/src/test/java/org/eclipse/tahu/util/PayloadUtilTest.java
+@@ -24,6 +24,7 @@ import org.eclipse.tahu.message.model.Metric.MetricBuilder;
+ import org.eclipse.tahu.message.model.MetricDataType;
+ import org.eclipse.tahu.message.model.SparkplugBPayload;
+ import org.eclipse.tahu.message.model.SparkplugBPayload.SparkplugBPayloadBuilder;
++import org.eclipse.tahu.message.model.Template;
+ import org.testng.annotations.DataProvider;
+ import org.testng.annotations.Test;
+ 
+@@ -91,4 +92,52 @@ public class PayloadUtilTest {
+ 		}
+ 
+ 	}
++
++	@DataProvider
++	public Object[][] jsonData() throws Exception {
++		return new Object[][] { { "{\n" + "  \"timestamp\" : 1766420430879,\n" + "  \"metrics\" : [ {\n"
++				+ "    \"name\" : \"Test UDT\",\n" + "    \"timestamp\" : 1766420430878,\n"
++				+ "    \"dataType\" : \"Template\",\n" + "    \"metaData\" : {\n"
++				+ "      \"md5\" : \"a6254ee7db0ae8bd854d4eb296aa78ee\"\n" + "    },\n" + "    \"value\" : {\n"
++				+ "      \"isDefinition\" : true,\n" + "      \"metrics\" : [ {\n"
++				+ "        \"name\" : \"UDTOPCTag\",\n" + "        \"timestamp\" : 1766420429756,\n"
++				+ "        \"dataType\" : \"Int32\",\n" + "        \"metaData\" : { },\n" + "        \"value\" : null\n"
++				+ "      }, {\n" + "        \"name\" : \"UDTMemoryTag\",\n" + "        \"timestamp\" : 1766420429757,\n"
++				+ "        \"dataType\" : \"Int32\",\n" + "        \"metaData\" : { },\n" + "        \"value\" : null\n"
++				+ "      } ]\n" + "    }\n" + "  }, {\n" + "    \"name\" : \"Node Control/Next Server\",\n"
++				+ "    \"timestamp\" : 1766420430881,\n" + "    \"dataType\" : \"Boolean\",\n"
++				+ "    \"properties\" : {\n" + "      \"documentation\" : {\n" + "        \"type\" : \"String\",\n"
++				+ "        \"value\" : \"Writeable tag to request the Edge Node to walk to the next MQTT server\"\n"
++				+ "      }\n" + "    },\n" + "    \"value\" : false\n" + "  }, {\n"
++				+ "    \"name\" : \"Node Info/Transmission Version\",\n" + "    \"timestamp\" : 1766420430881,\n"
++				+ "    \"dataType\" : \"String\",\n" + "    \"properties\" : {\n" + "      \"documentation\" : {\n"
++				+ "        \"type\" : \"String\",\n"
++				+ "        \"value\" : \"The version of MQTT Transmission installed at the Edge Node\"\n" + "      }\n"
++				+ "    },\n" + "    \"value\" : \"4.0.33-SNAPSHOT (b2025121922)\"\n" + "  }, {\n"
++				+ "    \"name\" : \"bdSeq\",\n" + "    \"timestamp\" : 1766420430880,\n"
++				+ "    \"dataType\" : \"Int64\",\n" + "    \"value\" : 135\n" + "  }, {\n"
++				+ "    \"name\" : \"Node Control/Rebirth\",\n" + "    \"timestamp\" : 1766420430881,\n"
++				+ "    \"dataType\" : \"Boolean\",\n" + "    \"properties\" : {\n" + "      \"documentation\" : {\n"
++				+ "        \"type\" : \"String\",\n"
++				+ "        \"value\" : \"Writeable tag to request the Edge Node to resend its cached NBIRTH and DBIRTH messages without disconnecting or sending DEATH messages first\"\n"
++				+ "      }\n" + "    },\n" + "    \"value\" : false\n" + "  } ],\n" + "  \"seq\" : 0\n" + "}" } };
++	}
++
++	@Test(
++			dataProvider = "jsonData")
++	public void testJson(String jsonPayload) throws Exception {
++		SparkplugBPayload sparkplugPayload = PayloadUtil.fromJsonString(jsonPayload);
++
++		for (Metric metric : sparkplugPayload.getMetrics()) {
++			if (MetricDataType.Template.equals(metric.getDataType())) {
++				System.out.println("Template: " + metric.getDataType());
++			}
++
++			if (MetricDataType.Template.equals(metric.getDataType()) && ((Template) metric.getValue()).isDefinition()) {
++				System.out.println("Valid type and definition? " + ((Template) metric.getValue()).isDefinition());
++			}
++		}
++
++		System.out.println("sparkplugPayload: " + sparkplugPayload);
++	}
+ }
+diff --git a/python/core/sparkplug_b.py b/python/core/sparkplug_b.py
+index 98d5785..9e0ad47 100644
+--- a/python/core/sparkplug_b.py
++++ b/python/core/sparkplug_b.py
+@@ -123,6 +123,34 @@ def getDeviceBirthPayload():
+     return payload
+ ######################################################################
+ 
++
++
++
++
++
++
++
++
++
++######################################################################
++# Get a CMD Payload
++#######################################################################
++def getCmdPayload():
++    payload = sparkplug_b_pb2.Payload()
++    payload.timestamp = int(round(time.time() * 1000))
++    return payload
++
++
++
++
++
++
++
++
++
++
++
++
+ ######################################################################
+ # Get a DDATA payload
+ ######################################################################
+diff --git a/python/examples/example.py b/python/examples/example.py
+index 107e5ac..7b7b265 100755
+--- a/python/examples/example.py
++++ b/python/examples/example.py
+@@ -25,9 +25,9 @@ from sparkplug_b import *
+ 
+ # Application Variables
+ serverUrl = "localhost"
+-myGroupId = "Sparkplug B Devices"
+-myNodeName = "Python Edge Node 1"
+-myDeviceName = "Emulated Device"
++myGroupId = "G1"
++myNodeName = "E1"
++myDeviceName = "D1"
+ publishPeriod = 5000
+ myUsername = "admin"
+ myPassword = "changeme"
+@@ -270,7 +270,7 @@ while True:
+     metric.properties.keys.extend(["Quality"])
+     propertyValue = metric.properties.values.add()
+     propertyValue.type = ParameterDataType.Int32
+-    propertyValue.int_value = 500
++    propertyValue.int_value = -2147483132 + 2**32
+ 
+     # Publish a message data
+     byteArray = bytearray(payload.SerializeToString())
+diff --git a/sparkplug_b/sparkplug_b.proto b/sparkplug_b/sparkplug_b.proto
+index bf72ab5..026e12b 100644
+--- a/sparkplug_b/sparkplug_b.proto
++++ b/sparkplug_b/sparkplug_b.proto
+@@ -1,4 +1,4 @@
+-// * Copyright (c) 2015, 2018 Cirrus Link Solutions and others
++// * Copyright (c) 2015-2021 Cirrus Link Solutions and others
+ // *
+ // * This program and the accompanying materials are made available under the
+ // * terms of the Eclipse Public License 2.0 which is available at
+@@ -73,25 +73,40 @@ enum DataType {
+ 
+ message Payload {
+ 
++    message TypedValue {
++        optional DataType datatype = 1;
++        optional bool     is_null  = 2;
++
++        oneof value {
++            int32    int32_value                    = 3;
++            int64    int64_value                    = 4;
++            uint32   uint32_value                   = 5;
++            uint64   uint64_value                   = 6;
++            float    float_value                    = 7;
++            double   double_value                   = 8;
++            bool     boolean_value                  = 9;
++            string   string_value                   = 10;
++            bytes    bytes_value                    = 11;
++            DataSet  dataset_value                  = 12;
++            Template template_value                 = 13;
++            PropertySet     propertyset_value       = 14;
++            PropertySetList propertysets_value      = 15;
++            TypedValueExtension extension_value     = 16;
++        }
++
++        message TypedValueExtension {
++            extensions  1 to max;
++        }
++
++        extensions 17 to max;
++    }
++
+     message Template {
+ 
+         message Parameter {
+-            optional string name        = 1;
+-            optional uint32 type        = 2;
+-
+-            oneof value {
+-                uint32 int_value        = 3;
+-                uint64 long_value       = 4;
+-                float  float_value      = 5;
+-                double double_value     = 6;
+-                bool   boolean_value    = 7;
+-                string string_value     = 8;
+-                ParameterValueExtension extension_value = 9;
+-            }
+-
+-            message ParameterValueExtension {
+-                extensions              1 to max;
+-            }
++            optional string name            = 1;
++            optional TypedValue typed_value = 2;
++            extensions                      3 to max;
+         }
+ 
+         optional string version         = 1;          // The version of the Template to prevent mismatches
+@@ -104,60 +119,28 @@ message Payload {
+ 
+     message DataSet {
+ 
+-        message DataSetValue {
+-
+-            oneof value {
+-                uint32 int_value                        = 1;
+-                uint64 long_value                       = 2;
+-                float  float_value                      = 3;
+-                double double_value                     = 4;
+-                bool   boolean_value                    = 5;
+-                string string_value                     = 6;
+-                DataSetValueExtension extension_value   = 7;
+-            }
+-
+-            message DataSetValueExtension {
+-                extensions  1 to max;
+-            }
+-        }
+-
+-        message Row {
+-            repeated DataSetValue elements  = 1;
+-            extensions                      2 to max;   // For third party extensions
+-        }
+-
+-        optional uint64   num_of_columns    = 1;
+-        repeated string   columns           = 2;
+-        repeated uint32   types             = 3;
+-        repeated Row      rows              = 4;
+-        extensions                          5 to max;   // For third party extensions
+-    }
+-
+-    message PropertyValue {
++        message Column {
++            optional string name     = 1;
++            optional DataType datatype = 2;
+ 
+-        optional uint32     type                    = 1;
+-        optional bool       is_null                 = 2;
++            // Only one type of repeated value shall be used per Column
++            repeated uint32 int_values       = 3 [packed=true];
++            repeated uint64 long_values      = 4 [packed=true];
++            repeated float  float_values     = 5 [packed=true];
++            repeated double double_values    = 6 [packed=true];
++            repeated bool   boolean_values   = 7 [packed=true];
++            repeated string string_values    = 8 [packed=false];
+ 
+-        oneof value {
+-            uint32          int_value               = 3;
+-            uint64          long_value              = 4;
+-            float           float_value             = 5;
+-            double          double_value            = 6;
+-            bool            boolean_value           = 7;
+-            string          string_value            = 8;
+-            PropertySet     propertyset_value       = 9;
+-            PropertySetList propertysets_value      = 10;      // List of Property Values
+-            PropertyValueExtension extension_value  = 11;
++            extensions                       9 to max;
+         }
+ 
+-        message PropertyValueExtension {
+-            extensions                             1 to max;
+-        }
++        repeated Column columns              = 1;
++        extensions                           2 to max;
+     }
+ 
+     message PropertySet {
+         repeated string        keys     = 1;         // Names of the properties
+-        repeated PropertyValue values   = 2;
++        repeated TypedValue    values   = 2;         // The Property Values
+         extensions                      3 to max;
+     }
+ 
+@@ -180,45 +163,36 @@ message Payload {
+         optional string file_type       = 6;        // File type (i.e. xml, json, txt, cpp, etc)
+         optional string md5             = 7;        // md5 of data
+ 
+-        // Catchalls and future expansion
++        // Others
+         optional string description     = 8;        // Could be anything such as json or xml of custom properties
+-        extensions                      9 to max;
++        optional string engUnit         = 9;        // Engineering units
++
++        // Future expansion
++        extensions                      10 to max;
+     }
+ 
+     message Metric {
+ 
+-        optional string   name          = 1;        // Metric name - should only be included on birth
+-        optional uint64   alias         = 2;        // Metric alias - tied to name on birth and included in all later DATA messages
+-        optional uint64   timestamp     = 3;        // Timestamp associated with data acquisition time
+-        optional uint32   datatype      = 4;        // DataType of the metric/tag value
+-        optional bool     is_historical = 5;        // If this is historical data and should not update real time tag
+-        optional bool     is_transient  = 6;        // Tells consuming clients such as MQTT Engine to not store this as a tag
+-        optional bool     is_null       = 7;        // If this is null - explicitly say so rather than using -1, false, etc for some datatypes.
+-        optional MetaData metadata      = 8;        // Metadata for the payload
+-        optional PropertySet properties = 9;
+-
+-        oneof value {
+-            uint32   int_value                      = 10;
+-            uint64   long_value                     = 11;
+-            float    float_value                    = 12;
+-            double   double_value                   = 13;
+-            bool     boolean_value                  = 14;
+-            string   string_value                   = 15;
+-            bytes    bytes_value                    = 16;       // Bytes, File
+-            DataSet  dataset_value                  = 17;
+-            Template template_value                 = 18;
+-            MetricValueExtension extension_value    = 19;
+-        }
+-
+-        message MetricValueExtension {
+-            extensions  1 to max;
+-        }
++        optional string   name          = 1;        // Metric name - Required in BIRTH messages, optional in DATA messages if using aliases
++        optional uint64   alias         = 2;        // Metric alias - tied to name on BIRTH and included in all later DATA messages
++        optional uint64   timestamp     = 3;        // Timestamp associated with data acquisition time - if omitted, the overall payload timestamp is assumed as the data acquisition time
++        optional DataType datatype      = 4;        // DataType of the metric/tag value
++        optional string   source        = 5;        // Source for CMD messages if unique to the Metric (typically for forwarded writes in CMD messages)
++        optional bool     is_historical = 6;        // If this is historical data and should not update real time tag
++        optional bool     is_transient  = 7;        // Tells consuming clients such as MQTT Engine to not store this as a tag
++        optional bool     is_null       = 8;        // If this is null - explicitly say so rather than using -1, false, etc for some datatypes.
++        optional MetaData metadata      = 9;        // Metadata for the Metric
++        optional PropertySet properties = 10;       // Properties of the Metric
++        optional TypedValue value       = 11;
++        extensions 12 to max;
+     }
+ 
+     optional uint64   timestamp     = 1;        // Timestamp at message sending time
+     repeated Metric   metrics       = 2;        // Repeated forever - no limit in Google Protobufs
+-    optional uint64   seq           = 3;        // Sequence number
+-    optional string   uuid          = 4;        // UUID to track message type in terms of schema definitions
+-    optional bytes    body          = 5;        // To optionally bypass the whole definition above
+-    extensions                      6 to max;   // For third party extensions
++    optional uint64   seq           = 3;        // Message sequence number
++    optional uint64   bd_seq        = 4;        // The Birth/Death sequence number for BIRTH and DEATH payloads
++    optional string   source        = 5;        // Source for CMD and REBIRTH messages - the Host Application ID that sent the message
++    optional string   uuid          = 6;        // UUID to track message type in terms of schema definitions
++    optional bytes    body          = 7;        // To optionally bypass the whole definition above
++    extensions                      8 to max;   // For third party extensions
+ }
+diff --git a/sparkplug_b/sparkplug_b_c_sharp.proto b/sparkplug_b/sparkplug_b_c_sharp.proto
+index 46ef3b1..02c40f0 100644
+--- a/sparkplug_b/sparkplug_b_c_sharp.proto
++++ b/sparkplug_b/sparkplug_b_c_sharp.proto
+@@ -105,33 +105,23 @@ message Payload {
+ 
+     message DataSet {
+ 
+-        message DataSetValue {
+-
+-            oneof value {
+-                uint32 int_value                        = 1;
+-                uint64 long_value                       = 2;
+-                float  float_value                      = 3;
+-                double double_value                     = 4;
+-                bool   boolean_value                    = 5;
+-                string string_value                     = 6;
+-                DataSetValueExtension extension_value   = 7;
+-            }
+-
+-            message DataSetValueExtension {
+-                repeated google.protobuf.Any details = 1;
+-            }
+-        }
+-
+-        message Row {
+-            repeated DataSetValue elements  = 1;
+-            repeated google.protobuf.Any details = 2;
++        message Column {
++            optional string name = 1;
++            optional uint32 type = 2;
++
++            // Only one type of repeated value shall be used per Column
++            repeated uint32 int_values       = 3 [packed=true];
++            repeated uint64 long_values      = 4 [packed=true];
++            repeated float  float_values     = 5 [packed=true];
++            repeated double double_values    = 6 [packed=true];
++            repeated bool   boolean_values   = 7 [packed=true];
++            repeated string string_values    = 8 [packed=false];
++
++            extensions                       9 to max;
+         }
+ 
+-        uint64 num_of_columns                = 1;
+-        repeated string   columns            = 2;
+-        repeated uint32   types              = 3;
+-        repeated Row      rows               = 4;
+-        repeated google.protobuf.Any details = 5;
++        repeated Column columns              = 1;
++        extensions                           2 to max;
+     }
+ 
+     message PropertyValue {
