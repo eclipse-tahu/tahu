@@ -500,7 +500,7 @@ void publish_node_birth(struct mosquitto *mosq) {
     // Add the UDT to the payload
     add_metric_to_payload(&nbirth_payload, &metric);
 
-#ifdef SPARKPLUG_DEBUG
+#if SPARKPLUG_DEBUG
     // Print the payload for debug
     print_payload(&nbirth_payload);
 #endif
@@ -591,7 +591,7 @@ void publish_device_birth(struct mosquitto *mosq) {
     // Add the UDT Instance to the payload
     add_metric_to_payload(&dbirth_payload, &metric);
 
-#ifdef SPARKPLUG_DEBUG
+#if SPARKPLUG_DEBUG
     // Print the payload
     print_payload(&dbirth_payload);
 #endif
@@ -638,7 +638,7 @@ void publish_ddata_message(struct mosquitto *mosq) {
     float ddata_metric_float_value = ((float)rand() / (float)(RAND_MAX)) * 5.0;
     add_simple_metric(&ddata_payload, NULL, true, ALIAS_DEVICE_METRIC_FLOAT, METRIC_DATA_TYPE_FLOAT, false, false, &ddata_metric_float_value, sizeof(ddata_metric_float_value));
 
-#ifdef SPARKPLUG_DEBUG
+#if SPARKPLUG_DEBUG
     // Print the payload
     print_payload(&ddata_payload);
 #endif
