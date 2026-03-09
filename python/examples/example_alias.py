@@ -27,7 +27,6 @@ from sparkplug_b import *
 serverUrl = "localhost"
 myGroupId = "G1"
 myNodeName = "E1"
-myDeviceName = "D1"
 publishPeriod = 5000
 myUsername = "admin"
 myPassword = "changeme"
@@ -41,11 +40,7 @@ class AliasMap:
     Node_Metric1 = 5
     Node_Metric2 = 6
     Node_Metric3 = 7
-    Device_Metric0 = 8
-    Device_Metric1 = 9
-    Device_Metric2 = 10
-    Device_Metric3 = 11
-    My_Custom_Motor = 12
+    Node_Metric4 = 8
 
 ######################################################################
 # The callback for when the client receives a CONNACK response from the server.
@@ -58,12 +53,11 @@ def on_connect(client, userdata, flags, rc):
         sys.exit()
 
     global myGroupId
-    global myNodeName
+    global my0NodeName
 
     # Subscribing in on_connect() means that if we lose the connection and
     # reconnect then subscriptions will be renewed.
     client.subscribe("spBv1.0/" + myGroupId + "/NCMD/" + myNodeName + "/#")
-    client.subscribe("spBv1.0/" + myGroupId + "/DCMD/" + myNodeName + "/#")
 ######################################################################
 
 ######################################################################
@@ -96,40 +90,6 @@ def on_message(client, userdata, msg):
                 # In this case, we fake a full reboot with a republishing of the NBIRTH and DBIRTH
                 # messages.
                 publishBirth()
-            elif metric.name == "output/Device Metric2" or metric.alias == AliasMap.Device_Metric2:
-                # This is a metric we declared in our DBIRTH message and we're emulating an output.
-                # So, on incoming 'writes' to the output we must publish a DDATA with the new output
-                # value.  If this were a real output we'd write to the output and then read it back
-                # before publishing a DDATA message.
-
-                # We know this is an Int16 because of how we declated it in the DBIRTH
-                newValue = metric.int_value
-                print( "CMD message for output/Device Metric2 - New Value: {}".format(newValue))
-
-                # Create the DDATA payload - Use the alias because this isn't the DBIRTH
-                payload = sparkplug.getDdataPayload()
-                addMetric(payload, None, AliasMap.Device_Metric2, MetricDataType.Int16, newValue)
-
-                # Publish a message data
-                byteArray = bytearray(payload.SerializeToString())
-                client.publish("spBv1.0/" + myGroupId + "/DDATA/" + myNodeName + "/" + myDeviceName, byteArray, 0, False)
-            elif metric.name == "output/Device Metric3" or metric.alias == AliasMap.Device_Metric3:
-                # This is a metric we declared in our DBIRTH message and we're emulating an output.
-                # So, on incoming 'writes' to the output we must publish a DDATA with the new output
-                # value.  If this were a real output we'd write to the output and then read it back
-                # before publishing a DDATA message.
-
-                # We know this is an Boolean because of how we declated it in the DBIRTH
-                newValue = metric.boolean_value
-                print( "CMD message for output/Device Metric3 - New Value: %r" % newValue)
-
-                # Create the DDATA payload - use the alias because this isn't the DBIRTH
-                payload = sparkplug.getDdataPayload()
-                addMetric(payload, None, AliasMap.Device_Metric3, MetricDataType.Boolean, newValue)
-
-                # Publish a message data
-                byteArray = bytearray(payload.SerializeToString())
-                client.publish("spBv1.0/" + myGroupId + "/DDATA/" + myNodeName + "/" + myDeviceName, byteArray, 0, False)
             else:
                 print( "Unknown command: " + metric.name)
     else:
@@ -143,7 +103,6 @@ def on_message(client, userdata, msg):
 ######################################################################
 def publishBirth():
     publishNodeBirth()
-    publishDeviceBirth()
 ######################################################################
 
 ######################################################################
@@ -164,6 +123,7 @@ def publishNodeBirth():
     addMetric(payload, "Node Metric0", AliasMap.Node_Metric0, MetricDataType.String, "hello node")
     addMetric(payload, "Node Metric1", AliasMap.Node_Metric1, MetricDataType.Boolean, True)
     addNullMetric(payload, "Node Metric3", AliasMap.Node_Metric3, MetricDataType.Int32)
+    addMetric(payload, "Node Control/Current Second", AliasMap.Node_Metric4, MetricDataType.Int32, 11)
 
     # Create a DataSet (012 - 345) two rows with Int8, Int16, and Int32 contents and headers Int8s, Int16s, Int32s and add it to the payload
     columns = ["Int8s", "Int16s", "Int32s"]
@@ -206,35 +166,6 @@ def publishNodeBirth():
 ######################################################################
 
 ######################################################################
-# Publish the DBIRTH certificate
-######################################################################
-def publishDeviceBirth():
-    print( "Publishing Device Birth")
-
-    # Get the payload
-    payload = sparkplug.getDeviceBirthPayload()
-
-    # Add some device metrics
-    addMetric(payload, "input/Device Metric0", AliasMap.Device_Metric0, MetricDataType.String, "hello device")
-    addMetric(payload, "input/Device Metric1", AliasMap.Device_Metric1, MetricDataType.Boolean, True)
-    addMetric(payload, "output/Device Metric2", AliasMap.Device_Metric2, MetricDataType.Int16, 16)
-    addMetric(payload, "output/Device Metric3", AliasMap.Device_Metric3, MetricDataType.Boolean, True)
-
-    # Create the UDT definition value which includes two UDT members and a single parameter and add it to the payload
-    template = initTemplateMetric(payload, "My_Custom_Motor", AliasMap.My_Custom_Motor, "Custom_Motor")
-    templateParameter = template.parameters.add()
-    templateParameter.name = "Index"
-    templateParameter.type = ParameterDataType.String
-    templateParameter.string_value = "1"
-    addMetric(template, "RPMs", None, MetricDataType.Int32, 123)    # No alias in UDT members
-    addMetric(template, "AMPs", None, MetricDataType.Int32, 456)    # No alias in UDT members
-
-    # Publish the initial data with the Device BIRTH certificate
-    totalByteArray = bytearray(payload.SerializeToString())
-    client.publish("spBv1.0/" + myGroupId + "/DBIRTH/" + myNodeName + "/" + myDeviceName, totalByteArray, 0, False)
-######################################################################
-
-######################################################################
 # Main Application
 ######################################################################
 print("Starting main application")
@@ -259,22 +190,12 @@ client.loop()
 publishBirth()
 
 while True:
-    # Periodically publish some new data
-    payload = sparkplug.getDdataPayload()
-
-    # Add some random data to the inputs
-    addMetric(payload, None, AliasMap.Device_Metric0, MetricDataType.String, ''.join(random.choice(string.ascii_lowercase) for i in range(12)))
-
-    # Note this data we're setting to STALE via the propertyset as an example
-    metric = addMetric(payload, None, AliasMap.Device_Metric1, MetricDataType.Boolean, random.choice([True, False]))
-    metric.properties.keys.extend(["Quality"])
-    propertyValue = metric.properties.values.add()
-    propertyValue.type = ParameterDataType.Int32
-    propertyValue.int_value = -2147483132 + 2**32
-
-    # Publish a message data
-    byteArray = bytearray(payload.SerializeToString())
-    client.publish("spBv1.0/" + myGroupId + "/DDATA/" + myNodeName + "/" + myDeviceName, byteArray, 0, False)
+    # NDATA
+    nodeDataPayload = sparkplug.getDdataPayload()
+    addMetric(nodeDataPayload, None, AliasMap.Node_Metric3, MetricDataType.Int32, random.randrange(0, 100))
+    addMetric(nodeDataPayload, None, AliasMap.Node_Metric4, MetricDataType.Int32, random.randrange(0, 100))
+    byteArray = bytearray(nodeDataPayload.SerializeToString())
+    client.publish("spBv1.0/" + myGroupId + "/NDATA/" + myNodeName, byteArray, 0, False)
 
     # Sit and wait for inbound or outbound events
     for _ in range(5):

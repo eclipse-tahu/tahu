@@ -25,27 +25,12 @@ from sparkplug_b import *
 
 # Application Variables
 serverUrl = "localhost"
-myGroupId = "G1"
-myNodeName = "E1"
-myDeviceName = "D1"
+myGroupId = "Sparkplug B Devices"
+myNodeName = "Python Edge Node 1"
+myDeviceName = "Emulated Device"
 publishPeriod = 5000
 myUsername = "admin"
 myPassword = "changeme"
-
-class AliasMap:
-    Next_Server = 0
-    Rebirth = 1
-    Reboot = 2
-    Dataset = 3
-    Node_Metric0 = 4
-    Node_Metric1 = 5
-    Node_Metric2 = 6
-    Node_Metric3 = 7
-    Device_Metric0 = 8
-    Device_Metric1 = 9
-    Device_Metric2 = 10
-    Device_Metric3 = 11
-    My_Custom_Motor = 12
 
 ######################################################################
 # The callback for when the client receives a CONNACK response from the server.
@@ -77,26 +62,26 @@ def on_message(client, userdata, msg):
         inboundPayload = sparkplug_b_pb2.Payload()
         inboundPayload.ParseFromString(msg.payload)
         for metric in inboundPayload.metrics:
-            if metric.name == "Node Control/Next Server" or metric.alias == AliasMap.Next_Server:
+            if metric.name == "Node Control/Next Server":
                 # 'Node Control/Next Server' is an NCMD used to tell the device/client application to
                 # disconnect from the current MQTT server and connect to the next MQTT server in the
                 # list of available servers.  This is used for clients that have a pool of MQTT servers
                 # to connect to.
                 print( "'Node Control/Next Server' is not implemented in this example")
-            elif metric.name == "Node Control/Rebirth" or metric.alias == AliasMap.Rebirth:
+            elif metric.name == "Node Control/Rebirth":
                 # 'Node Control/Rebirth' is an NCMD used to tell the device/client application to resend
                 # its full NBIRTH and DBIRTH again.  MQTT Engine will send this NCMD to a device/client
                 # application if it receives an NDATA or DDATA with a metric that was not published in the
                 # original NBIRTH or DBIRTH.  This is why the application must send all known metrics in
                 # its original NBIRTH and DBIRTH messages.
                 publishBirth()
-            elif metric.name == "Node Control/Reboot" or metric.alias == AliasMap.Reboot:
+            elif metric.name == "Node Control/Reboot":
                 # 'Node Control/Reboot' is an NCMD used to tell a device/client application to reboot
                 # This can be used for devices that need a full application reset via a soft reboot.
                 # In this case, we fake a full reboot with a republishing of the NBIRTH and DBIRTH
                 # messages.
                 publishBirth()
-            elif metric.name == "output/Device Metric2" or metric.alias == AliasMap.Device_Metric2:
+            elif metric.name == "output/Device Metric2":
                 # This is a metric we declared in our DBIRTH message and we're emulating an output.
                 # So, on incoming 'writes' to the output we must publish a DDATA with the new output
                 # value.  If this were a real output we'd write to the output and then read it back
@@ -106,14 +91,14 @@ def on_message(client, userdata, msg):
                 newValue = metric.int_value
                 print( "CMD message for output/Device Metric2 - New Value: {}".format(newValue))
 
-                # Create the DDATA payload - Use the alias because this isn't the DBIRTH
+                # Create the DDATA payload
                 payload = sparkplug.getDdataPayload()
-                addMetric(payload, None, AliasMap.Device_Metric2, MetricDataType.Int16, newValue)
+                addMetric(payload, None, None, MetricDataType.Int16, newValue)
 
                 # Publish a message data
                 byteArray = bytearray(payload.SerializeToString())
                 client.publish("spBv1.0/" + myGroupId + "/DDATA/" + myNodeName + "/" + myDeviceName, byteArray, 0, False)
-            elif metric.name == "output/Device Metric3" or metric.alias == AliasMap.Device_Metric3:
+            elif metric.name == "output/Device Metric3":
                 # This is a metric we declared in our DBIRTH message and we're emulating an output.
                 # So, on incoming 'writes' to the output we must publish a DDATA with the new output
                 # value.  If this were a real output we'd write to the output and then read it back
@@ -123,9 +108,9 @@ def on_message(client, userdata, msg):
                 newValue = metric.boolean_value
                 print( "CMD message for output/Device Metric3 - New Value: %r" % newValue)
 
-                # Create the DDATA payload - use the alias because this isn't the DBIRTH
+                # Create the DDATA payload
                 payload = sparkplug.getDdataPayload()
-                addMetric(payload, None, AliasMap.Device_Metric3, MetricDataType.Boolean, newValue)
+                addMetric(payload, None, None, MetricDataType.Boolean, newValue)
 
                 # Publish a message data
                 byteArray = bytearray(payload.SerializeToString())
@@ -141,64 +126,27 @@ def on_message(client, userdata, msg):
 ######################################################################
 # Publish the BIRTH certificates
 ######################################################################
-def publishBirth():
-    publishNodeBirth()
-    publishDeviceBirth()
+def publishBirth(metricValue, timestamp):
+    publishNodeBirth(metricValue, timestamp)
+    publishDeviceBirth(metricValue, timestamp)
 ######################################################################
 
 ######################################################################
 # Publish the NBIRTH certificate
 ######################################################################
-def publishNodeBirth():
+def publishNodeBirth(metricValue, timestamp):
     print( "Publishing Node Birth")
 
     # Create the node birth payload
     payload = sparkplug.getNodeBirthPayload()
 
     # Set up the Node Controls
-    addMetric(payload, "Node Control/Next Server", AliasMap.Next_Server, MetricDataType.Boolean, False)
-    addMetric(payload, "Node Control/Rebirth", AliasMap.Rebirth, MetricDataType.Boolean, False)
-    addMetric(payload, "Node Control/Reboot", AliasMap.Reboot, MetricDataType.Boolean, False)
+    addMetric(payload, "Node Control/Next Server", None, MetricDataType.Boolean, False, timestamp)
+    addMetric(payload, "Node Control/Rebirth", None, MetricDataType.Boolean, False, timestamp)
+    addMetric(payload, "Node Control/Reboot", None, MetricDataType.Boolean, False, timestamp)
 
     # Add some regular node metrics
-    addMetric(payload, "Node Metric0", AliasMap.Node_Metric0, MetricDataType.String, "hello node")
-    addMetric(payload, "Node Metric1", AliasMap.Node_Metric1, MetricDataType.Boolean, True)
-    addNullMetric(payload, "Node Metric3", AliasMap.Node_Metric3, MetricDataType.Int32)
-
-    # Create a DataSet (012 - 345) two rows with Int8, Int16, and Int32 contents and headers Int8s, Int16s, Int32s and add it to the payload
-    columns = ["Int8s", "Int16s", "Int32s"]
-    types = [DataSetDataType.Int8, DataSetDataType.Int16, DataSetDataType.Int32]
-    dataset = initDatasetMetric(payload, "DataSet", AliasMap.Dataset, columns, types)
-    row = dataset.rows.add()
-    element = row.elements.add();
-    element.int_value = 0
-    element = row.elements.add();
-    element.int_value = 1
-    element = row.elements.add();
-    element.int_value = 2
-    row = dataset.rows.add()
-    element = row.elements.add();
-    element.int_value = 3
-    element = row.elements.add();
-    element.int_value = 4
-    element = row.elements.add();
-    element.int_value = 5
-
-    # Add a metric with a custom property
-    metric = addMetric(payload, "Node Metric2", AliasMap.Node_Metric2, MetricDataType.Int16, 13)
-    metric.properties.keys.extend(["engUnit"])
-    propertyValue = metric.properties.values.add()
-    propertyValue.type = ParameterDataType.String
-    propertyValue.string_value = "MyCustomUnits"
-
-    # Create the UDT definition value which includes two UDT members and a single parameter and add it to the payload
-    template = initTemplateMetric(payload, "_types_/Custom_Motor", None, None)    # No alias for Template definitions
-    templateParameter = template.parameters.add()
-    templateParameter.name = "Index"
-    templateParameter.type = ParameterDataType.String
-    templateParameter.string_value = "0"
-    addMetric(template, "RPMs", None, MetricDataType.Int32, 0)    # No alias in UDT members
-    addMetric(template, "AMPs", None, MetricDataType.Int32, 0)    # No alias in UDT members
+    addMetric(payload, "Node Metric0", None, MetricDataType.Int32, metricValue, timestamp)
 
     # Publish the node birth certificate
     byteArray = bytearray(payload.SerializeToString())
@@ -208,30 +156,36 @@ def publishNodeBirth():
 ######################################################################
 # Publish the DBIRTH certificate
 ######################################################################
-def publishDeviceBirth():
+def publishDeviceBirth(metricValue, timestamp):
     print( "Publishing Device Birth")
 
     # Get the payload
     payload = sparkplug.getDeviceBirthPayload()
 
     # Add some device metrics
-    addMetric(payload, "input/Device Metric0", AliasMap.Device_Metric0, MetricDataType.String, "hello device")
-    addMetric(payload, "input/Device Metric1", AliasMap.Device_Metric1, MetricDataType.Boolean, True)
-    addMetric(payload, "output/Device Metric2", AliasMap.Device_Metric2, MetricDataType.Int16, 16)
-    addMetric(payload, "output/Device Metric3", AliasMap.Device_Metric3, MetricDataType.Boolean, True)
-
-    # Create the UDT definition value which includes two UDT members and a single parameter and add it to the payload
-    template = initTemplateMetric(payload, "My_Custom_Motor", AliasMap.My_Custom_Motor, "Custom_Motor")
-    templateParameter = template.parameters.add()
-    templateParameter.name = "Index"
-    templateParameter.type = ParameterDataType.String
-    templateParameter.string_value = "1"
-    addMetric(template, "RPMs", None, MetricDataType.Int32, 123)    # No alias in UDT members
-    addMetric(template, "AMPs", None, MetricDataType.Int32, 456)    # No alias in UDT members
+    addMetric(payload, "Device Metric0", None, MetricDataType.Int32, metricValue, timestamp)
 
     # Publish the initial data with the Device BIRTH certificate
     totalByteArray = bytearray(payload.SerializeToString())
     client.publish("spBv1.0/" + myGroupId + "/DBIRTH/" + myNodeName + "/" + myDeviceName, totalByteArray, 0, False)
+######################################################################
+
+######################################################################
+# Publish DATA messages
+######################################################################
+def publishData(metricValue, timestamp):
+    # Periodically publish some new data
+    nPayload = sparkplug_b_pb2.Payload()
+    nPayload.timestamp = timestamp
+    nPayload.seq = getSeqNum()
+    addMetric(nPayload, "Node Metric0", None, MetricDataType.Int32, metricValue, timestamp)
+    dPayload = sparkplug.getDdataPayload()
+    addMetric(dPayload, "Device Metric0", None, MetricDataType.Int32, metricValue, timestamp)
+
+    byteArray = bytearray(nPayload.SerializeToString())
+    client.publish("spBv1.0/" + myGroupId + "/NDATA/" + myNodeName, byteArray, 0, False)
+    byteArray = bytearray(dPayload.SerializeToString())
+    client.publish("spBv1.0/" + myGroupId + "/DDATA/" + myNodeName + "/" + myDeviceName, byteArray, 0, False)
 ######################################################################
 
 ######################################################################
@@ -243,7 +197,7 @@ print("Starting main application")
 deathPayload = sparkplug.getNodeDeathPayload()
 
 # Start of main program - Set up the MQTT client connection
-client = mqtt.Client(serverUrl, 1883, 60)
+client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1, serverUrl, 1883, 60)
 client.on_connect = on_connect
 client.on_message = on_message
 client.username_pw_set(myUsername, myPassword)
@@ -255,27 +209,28 @@ client.connect(serverUrl, 1883, 60)
 time.sleep(.1)
 client.loop()
 
+# Get the BIRTH value and timestamp
+metricValue = 0
+timestamp = int(round(time.time() * 1000))
+
 # Publish the birth certificates
-publishBirth()
+publishBirth(metricValue, timestamp)
+
+# Increment values and publish data
+metricValue += 1
+print("Timestamp: " + str(timestamp))
+timestamp += 25
+print("Timestamp: " + str(timestamp))
+publishData(metricValue, timestamp)
+
+# Increment values and publish data
+metricValue += 1
+print("Timestamp: " + str(timestamp))
+timestamp -= 24
+print("Timestamp: " + str(timestamp))
+publishData(metricValue, timestamp)
 
 while True:
-    # Periodically publish some new data
-    payload = sparkplug.getDdataPayload()
-
-    # Add some random data to the inputs
-    addMetric(payload, None, AliasMap.Device_Metric0, MetricDataType.String, ''.join(random.choice(string.ascii_lowercase) for i in range(12)))
-
-    # Note this data we're setting to STALE via the propertyset as an example
-    metric = addMetric(payload, None, AliasMap.Device_Metric1, MetricDataType.Boolean, random.choice([True, False]))
-    metric.properties.keys.extend(["Quality"])
-    propertyValue = metric.properties.values.add()
-    propertyValue.type = ParameterDataType.Int32
-    propertyValue.int_value = -2147483132 + 2**32
-
-    # Publish a message data
-    byteArray = bytearray(payload.SerializeToString())
-    client.publish("spBv1.0/" + myGroupId + "/DDATA/" + myNodeName + "/" + myDeviceName, byteArray, 0, False)
-
     # Sit and wait for inbound or outbound events
     for _ in range(5):
         time.sleep(.1)
