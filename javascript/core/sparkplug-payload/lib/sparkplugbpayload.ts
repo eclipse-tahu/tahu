@@ -29,17 +29,17 @@ const MetaData = Payload.MetaData;
 const Metric = Payload.Metric;
 
 // import generated interfaces
-type IPayload = IProtoRoot.org.eclipse.tahu.protobuf.IPayload;
-type ITemplate = IProtoRoot.org.eclipse.tahu.protobuf.Payload.ITemplate;
-type IParameter = IProtoRoot.org.eclipse.tahu.protobuf.Payload.Template.IParameter;
-type IDataSet = IProtoRoot.org.eclipse.tahu.protobuf.Payload.IDataSet;
-type IDataSetValue = IProtoRoot.org.eclipse.tahu.protobuf.Payload.DataSet.IDataSetValue;
-type IRow = IProtoRoot.org.eclipse.tahu.protobuf.Payload.DataSet.IRow;
-type IPropertyValue = IProtoRoot.org.eclipse.tahu.protobuf.Payload.IPropertyValue;
-type IPropertySet = IProtoRoot.org.eclipse.tahu.protobuf.Payload.IPropertySet;
-type IPropertySetList = IProtoRoot.org.eclipse.tahu.protobuf.Payload.IPropertySetList;
-type IMetaData = IProtoRoot.org.eclipse.tahu.protobuf.Payload.IMetaData;
-type IMetric = IProtoRoot.org.eclipse.tahu.protobuf.Payload.IMetric;
+type IPayload = IProtoRoot.org.eclipse.tahu.protobuf.Payload.$Properties;
+type ITemplate = IProtoRoot.org.eclipse.tahu.protobuf.Payload.Template.$Properties;
+type IParameter = IProtoRoot.org.eclipse.tahu.protobuf.Payload.Template.Parameter.$Properties;
+type IDataSet = IProtoRoot.org.eclipse.tahu.protobuf.Payload.DataSet.$Properties;
+type IDataSetValue = IProtoRoot.org.eclipse.tahu.protobuf.Payload.DataSet.DataSetValue.$Properties;
+type IRow = IProtoRoot.org.eclipse.tahu.protobuf.Payload.DataSet.Row.$Properties;
+type IPropertyValue = IProtoRoot.org.eclipse.tahu.protobuf.Payload.PropertyValue.$Properties;
+type IPropertySet = IProtoRoot.org.eclipse.tahu.protobuf.Payload.PropertySet.$Properties;
+type IPropertySetList = IProtoRoot.org.eclipse.tahu.protobuf.Payload.PropertySetList.$Properties;
+type IMetaData = IProtoRoot.org.eclipse.tahu.protobuf.Payload.MetaData.$Properties;
+type IMetric = IProtoRoot.org.eclipse.tahu.protobuf.Payload.Metric.$Properties;
 
 // "user types"
 export type TypeStr = "Int8"
@@ -76,16 +76,16 @@ export type TypeStr = "Int8"
     | "BooleanArray"
     | "StringArray";
 
-export interface UMetric extends IMetric {
+export interface UMetric extends Omit<IMetric, 'value' | 'properties'> {
     value: null | number | Long.Long | boolean | string | Uint8Array | UDataSet | UTemplate | boolean[] | string[] | number[];
     type: TypeStr;
     properties?: Record<string, UPropertyValue>
 }
-export interface UPropertyValue extends Omit<IPropertyValue, 'type'> { // TODO is the type supposed to be like the metric type in the readme?
+export interface UPropertyValue extends Omit<IPropertyValue, 'type' | 'value'> { // TODO is the type supposed to be like the metric type in the readme?
     value: null | number | Long.Long | boolean | string | UPropertySet | UPropertySetList;
     type: TypeStr;
 }
-export interface UParameter extends Omit<IParameter, 'type'> { // TODO is the type supposed to be like the metric type in the readme?
+export interface UParameter extends Omit<IParameter, 'type' | 'value'> { // TODO is the type supposed to be like the metric type in the readme?
     value: number | Long.Long | boolean | string | UPropertySet | UPropertySetList;
     type: TypeStr;
 }
@@ -101,7 +101,7 @@ export type UDataSetValue = number | Long.Long | boolean | string;
 export type UPropertySet = Record<string, UPropertyValue>;
 export type UPropertySetList = UPropertySet[];
 export type UserValue = UMetric['value'] | UPropertyValue['value'] | UDataSet | UDataSetValue | UPropertySet | UPropertySetList;
-export interface UPayload extends IPayload {
+export interface UPayload extends Omit<IPayload, 'metrics'> {
     metrics?: UMetric[] | null;
 }
 
@@ -504,7 +504,7 @@ function encodeDataSet (object: UDataSet): ProtoRoot.org.eclipse.tahu.protobuf.P
         newRow.elements = elements;
         newRows.push(newRow);
     }
-    newDataSet.rows = newRows;
+    newDataSet.rows = newRows as any;
     return newDataSet;
 }
 
@@ -1092,7 +1092,7 @@ function encodeMetric (metric: UMetric): ProtoRoot.org.eclipse.tahu.protobuf.Pay
     }
 
     if (properties !== undefined && properties !== null) {
-        newMetric.properties = encodePropertySet(properties);
+        newMetric.properties = encodePropertySet(properties) as any;
     }
 
     return newMetric;
@@ -1156,7 +1156,7 @@ export function encodePayload(object: UPayload): Uint8Array {
         for (var i = 0; i < metrics.length; i++) {
             newMetrics.push(encodeMetric(metrics[i]));
         }
-        payload.metrics = newMetrics;
+        payload.metrics = newMetrics as any;
     }
 
     if (object.seq !== undefined && object.seq !== null) {
