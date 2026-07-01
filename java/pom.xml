@@ -291,6 +291,43 @@
       <id>central-release</id>
       <build>
         <plugins>
+          <!-- Maven Central REQUIRES a signed -sources.jar and -javadoc.jar for every artifact; without
+               them the Central Portal rejects the upload ("Deployment ... failed while publishing").
+               Release-only (in this profile) so CodeArtifact/fork builds don't pay the javadoc cost.
+               These run at 'package' so gpg:sign (deploy phase) also signs them. -->
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-source-plugin</artifactId>
+            <version>3.3.1</version>
+            <executions>
+              <execution>
+                <id>attach-sources</id>
+                <phase>package</phase>
+                <goals>
+                  <goal>jar-no-fork</goal>
+                </goals>
+              </execution>
+            </executions>
+          </plugin>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-javadoc-plugin</artifactId>
+            <version>3.11.2</version>
+            <configuration>
+              <!-- Don't let strict doclint / individual javadoc errors block the release bundle. -->
+              <doclint>none</doclint>
+              <failOnError>false</failOnError>
+            </configuration>
+            <executions>
+              <execution>
+                <id>attach-javadoc</id>
+                <phase>package</phase>
+                <goals>
+                  <goal>jar</goal>
+                </goals>
+              </execution>
+            </executions>
+          </plugin>
           <plugin>
             <groupId>org.apache.maven.plugins</groupId>
             <artifactId>maven-gpg-plugin</artifactId>
