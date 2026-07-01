@@ -17,28 +17,33 @@
   <modelVersion>4.0.0</modelVersion>
 
   <properties>
+    <!-- CI-friendly version. Canonical builds use the default '-SNAPSHOT' (artifacts stay
+         1.0.20-SNAPSHOT); per-fork CI overrides -Dchangelist=-<dev>-SNAPSHOT for collision-free
+         per-developer artifacts. -->
+    <revision>1.0.20</revision>
+    <changelist></changelist>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <main.basedir>${project.basedir}</main.basedir>
     <assertj.core.version>3.27.6</assertj.core.version>
     <commons.compress.version>1.28.0</commons.compress.version>
     <commons.io.version>2.20.0</commons.io.version>
     <commons.lang3.version>3.19.0</commons.lang3.version>
-    <jackson.version>2.20.1</jackson.version>
-    <jackson.annotations.version>2.20</jackson.annotations.version>
+    <jackson.version>2.21.2</jackson.version>
+    <jackson.annotations.version>2.21</jackson.annotations.version>
     <junit.version>4.13.2</junit.version>
     <slf4j.version>2.0.17</slf4j.version>
     <jaxb.api.version>2.3.1</jaxb.api.version>
-    <logback.version>1.5.21</logback.version>
+    <logback.version>1.5.34</logback.version>
     <maven.compiler.version>3.14.1</maven.compiler.version>
     <maven.bundle.version>5.1.1</maven.bundle.version>
     <paho.version>1.2.5</paho.version>
     <protobuf.version>3.25.5</protobuf.version>
-    <testng.version>6.9.10</testng.version>
+    <testng.version>6.14.3</testng.version>
   </properties>
 
   <groupId>org.eclipse.tahu</groupId>
   <artifactId>tahu</artifactId>
-  <version>1.0.19</version>
+  <version>${revision}${changelist}</version>
   <packaging>pom</packaging>
 
   <name>Eclipse Tahu</name>
@@ -115,6 +120,31 @@
     <module>compat_impl/host/pom.xml</module>
   </modules>
 
+  <!--
+    Pin Jackson across the reactor so transitive pulls (e.g. via victools
+    jsonschema-generator) cannot downgrade it below the version declared above.
+    Keeps tahu-core consumers off vulnerable Jackson (CVE-2026-24400).
+  -->
+  <dependencyManagement>
+    <dependencies>
+      <dependency>
+        <groupId>com.fasterxml.jackson.core</groupId>
+        <artifactId>jackson-core</artifactId>
+        <version>${jackson.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>com.fasterxml.jackson.core</groupId>
+        <artifactId>jackson-databind</artifactId>
+        <version>${jackson.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>com.fasterxml.jackson.core</groupId>
+        <artifactId>jackson-annotations</artifactId>
+        <version>${jackson.annotations.version}</version>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+
   <dependencies>
     <dependency>
       <groupId>junit</groupId>
@@ -125,7 +155,7 @@
     <dependency>
       <groupId>org.testng</groupId>
       <artifactId>testng</artifactId>
-      <version>6.9.10</version>
+      <version>${testng.version}</version>
       <scope>test</scope>
     </dependency>
     <dependency>
@@ -185,6 +215,33 @@
 
   <build>
     <plugins>
+      <!-- Resolves ${revision}/${changelist} in the installed/deployed POMs so consumers never see a
+           literal ${revision}. Required once CI-friendly versions are used; inherited by all modules. -->
+      <plugin>
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>flatten-maven-plugin</artifactId>
+        <version>1.6.0</version>
+        <configuration>
+          <updatePomFile>true</updatePomFile>
+          <flattenMode>resolveCiFriendliesOnly</flattenMode>
+        </configuration>
+        <executions>
+          <execution>
+            <id>flatten</id>
+            <phase>process-resources</phase>
+            <goals>
+              <goal>flatten</goal>
+            </goals>
+          </execution>
+          <execution>
+            <id>flatten.clean</id>
+            <phase>clean</phase>
+            <goals>
+              <goal>clean</goal>
+            </goals>
+          </execution>
+        </executions>
+      </plugin>
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-compiler-plugin</artifactId>
@@ -222,46 +279,51 @@
           </execution>
         </executions>
       </plugin>
-      <plugin>
-        <groupId>org.apache.maven.plugins</groupId>
-        <artifactId>maven-gpg-plugin</artifactId>
-        <version>1.6</version>
-        <executions>
-          <execution>
-            <id>sign-artifacts</id>
-            <phase>deploy</phase>
-            <goals>
-              <goal>sign</goal>
-            </goals>
-            <configuration>
-                <gpgArguments>
+    </plugins>
+  </build>
+
+  <!-- Maven Central publish path (GPG signing + Sonatype central-publishing). NOT active by default,
+       so CI builds that deploy to CodeArtifact never resolve/run these (the central-publishing build
+       extension was breaking the CodeArtifact mirror build). Activate with -Pcentral-release to publish
+       to Maven Central. -->
+  <profiles>
+    <profile>
+      <id>central-release</id>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-gpg-plugin</artifactId>
+            <version>1.6</version>
+            <executions>
+              <execution>
+                <id>sign-artifacts</id>
+                <phase>deploy</phase>
+                <goals>
+                  <goal>sign</goal>
+                </goals>
+                <configuration>
+                  <gpgArguments>
                     <arg>--pinentry-mode</arg>
                     <arg>loopback</arg>
-                </gpgArguments>
+                  </gpgArguments>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+          <!-- https://gitlab.eclipse.org/eclipsefdn/helpdesk/-/issues/6331 -->
+          <plugin>
+            <groupId>org.sonatype.central</groupId>
+            <artifactId>central-publishing-maven-plugin</artifactId>
+            <version>0.9.0</version>
+            <extensions>true</extensions>
+            <configuration>
+              <publishingServerId>central</publishingServerId>
+              <autoPublish>true</autoPublish>
             </configuration>
-          </execution>
-        </executions>
-      </plugin>
-      <!--
-      The following is based on this: https://gitlab.eclipse.org/eclipsefdn/helpdesk/-/issues/6331
-      -->
-      <plugin>
-        <groupId>org.sonatype.central</groupId>
-        <artifactId>central-publishing-maven-plugin</artifactId>
-        <version>0.9.0</version>
-        <extensions>true</extensions>
-        <configuration>
-          <publishingServerId>central</publishingServerId>
-          <autoPublish>true</autoPublish>
-        </configuration>
-      </plugin>
-    </plugins>
-    <extensions>
-      <extension>
-        <groupId>org.kuali.maven.wagons</groupId>
-        <artifactId>maven-s3-wagon</artifactId>
-        <version>1.2.1</version>
-      </extension>
-    </extensions>
-  </build>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+  </profiles>
 </project>

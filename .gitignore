@@ -16,3 +16,4 @@ sparkplug_example
 *.pyc
 *-tcp*
 pom.xml.versionsBackup
+.flattened-pom.xml

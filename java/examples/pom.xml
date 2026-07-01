@@ -29,12 +29,12 @@
     <paho.version>1.2.5</paho.version>
     <protobuf.version>3.25.5</protobuf.version>
     <slf4j.version>1.7.32</slf4j.version>
-    <testng.version>6.9.10</testng.version>
+    <testng.version>6.14.3</testng.version>
   </properties>
 
   <groupId>org.eclipse.tahu</groupId>
   <artifactId>tahu-examples</artifactId>
-  <version>1.0.19</version>
+  <version>${revision}${changelist}</version>
   <packaging>pom</packaging>
 
   <name>Eclipse Tahu</name>
@@ -256,12 +256,5 @@
         </dependencies>
       </plugin>
     </plugins>
-    <extensions>
-      <extension>
-        <groupId>org.kuali.maven.wagons</groupId>
-        <artifactId>maven-s3-wagon</artifactId>
-        <version>1.2.1</version>
-      </extension>
-    </extensions>
   </build>
 </project>
