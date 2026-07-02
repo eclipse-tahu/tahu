@@ -74,10 +74,11 @@ export type TypeStr = "Int8"
     | "FloatArray"
     | "DoubleArray"
     | "BooleanArray"
-    | "StringArray";
+    | "StringArray"
+    | "DateTimeArray";
 
 export interface UMetric extends IMetric {
-    value: null | number | Long.Long | boolean | string | Uint8Array | UDataSet | UTemplate | boolean[] | string[] | number[];
+    value: null | number | Long.Long | boolean | string | Uint8Array | UDataSet | UTemplate | boolean[] | string[] | number[] | bigint[] | Long.Long[];
     type: TypeStr;
     properties?: Record<string, UPropertyValue>
 }
@@ -157,28 +158,17 @@ function setValue (type: number, value: UserValue, object: IMetric | IPropertyVa
             (object as IPropertyValue).propertysetsValue = encodePropertySetList(value as UPropertySetList);
             break;
         case 22:
-            (object as IMetric).bytesValue = encodeInt8Array(value as Array<number>);
-            break;
         case 23:
-            (object as IMetric).bytesValue = encodeInt16Array(value as Array<number>);
-            break;
         case 24:
-            (object as IMetric).bytesValue = encodeInt32Array(value as Array<number>);
-            break;
+        case 25:
         case 26:
-            (object as IMetric).bytesValue = encodeUInt8Array(value as Array<number>);
-            break;
         case 27:
-            (object as IMetric).bytesValue = encodeUInt16Array(value as Array<number>);
-            break;
         case 28:
-            (object as IMetric).bytesValue = encodeUInt32Array(value as Array<number>);
-            break;
+        case 29:
         case 30:
-            (object as IMetric).bytesValue = encodeFloatArray(value as Array<number>);
-            break;
         case 31:
-            (object as IMetric).bytesValue = encodeDoubleArray(value as Array<number>);
+        case 34:
+            (object as IMetric).bytesValue = packValues(value as Array<number | bigint | Long.Long>, NUMERIC_ARRAY_FORMAT[type]);
             break;
         case 32:
             (object as IMetric).bytesValue = encodeBooleanArray(value as Array<boolean>);
@@ -237,21 +227,17 @@ function getValue<T extends UserValue> (type: number | null | undefined, object:
         case 21:
             return decodePropertySetList((object as IPropertyValue).propertysetsValue!) as T;
         case 22:
-            return decodeInt8Array((object as IMetric).bytesValue!) as T;
         case 23:
-            return decodeInt16Array((object as IMetric).bytesValue!) as T;
         case 24:
-            return decodeInt32Array((object as IMetric).bytesValue!) as T;
+        case 25:
         case 26:
-            return decodeUInt8Array((object as IMetric).bytesValue!) as T;
         case 27:
-            return decodeUInt16Array((object as IMetric).bytesValue!) as T;
         case 28:
-            return decodeUInt32Array((object as IMetric).bytesValue!) as T;
+        case 29:
         case 30:
-            return decodeFloatArray((object as IMetric).bytesValue!) as T;
         case 31:
-            return decodeDoubleArray((object as IMetric).bytesValue!) as T;
+        case 34:
+            return unpackValues((object as IMetric).bytesValue!, NUMERIC_ARRAY_FORMAT[type]) as T;
         case 32:
             return decodeBooleanArray((object as IMetric).bytesValue!) as T;
         case 33:
@@ -374,12 +360,16 @@ function encodeType(typeString: string): number {
             return 23;
         case "INT32ARRAY":
             return 24;
+        case "INT64ARRAY":
+            return 25;
         case "UINT8ARRAY":
             return 26;
         case "UINT16ARRAY":
             return 27;
         case "UINT32ARRAY":
             return 28;
+        case "UINT64ARRAY":
+            return 29;
         case "FLOATARRAY":
             return 30;
         case "DOUBLEARRAY":
@@ -388,13 +378,14 @@ function encodeType(typeString: string): number {
             return 32;
         case "STRINGARRAY":
             return 33;
+        case "DATETIMEARRAY":
+            return 34;
         default:
             return 0;
     }
 }
 
 /** transforms a type code into a user friendly type */
-// @ts-expect-error TODO no consistent return
 function decodeType (typeInt: number | null | undefined): TypeStr {
     switch (typeInt) {
         case 1:
@@ -445,12 +436,16 @@ function decodeType (typeInt: number | null | undefined): TypeStr {
             return "Int16Array";
         case 24:
             return "Int32Array";
+        case 25:
+            return "Int64Array";
         case 26:
             return "UInt8Array";
         case 27:
             return "UInt16Array";
         case 28:
             return "UInt32Array";
+        case 29:
+            return "UInt64Array";    
         case 30:
             return "FloatArray";
         case 31:
@@ -459,6 +454,10 @@ function decodeType (typeInt: number | null | undefined): TypeStr {
             return "BooleanArray";
         case 33:
             return "StringArray";
+        case 34:
+            return "DateTimeArray";
+        default:
+            throw new Error(`Unknown type code: ${typeInt}`);
     }
 }
 
@@ -823,165 +822,116 @@ function decodeTemplate (protoTemplate: ITemplate): UTemplate {
     return template;
 }
 
-function encodeStringArray(array: Array<string>) {
+/** Maps a Sparkplug numeric array type code to its DataView format specifier */
+const NUMERIC_ARRAY_FORMAT: Record<number, string> = {
+    22: 'b', // Int8Array
+    23: 'h', // Int16Array
+    24: 'i', // Int32Array
+    25: 'l', // Int64Array
+    26: 'B', // UInt8Array
+    27: 'H', // UInt16Array
+    28: 'I', // UInt32Array
+    29: 'L', // UInt64Array
+    30: 'f', // FloatArray
+    31: 'd', // DoubleArray
+    34: 'L', // DateTimeArray (uint64 ms since epoch)
+};
+
+function encodeStringArray(array: string[]): Uint8Array {
+    if (array.length === 0) {
+        return new Uint8Array(0);
+    }
     return Buffer.from(array.join("\0") + '\0', 'utf8');
 }
   
-function decodeStringArray(packedBytes: Uint8Array | null) {
+function decodeStringArray(packedBytes: Uint8Array | null): string[] | null {
     if (packedBytes === null) {
         return null;
     }
+    if (packedBytes.length === 0) {
+        return [];
+    }
     return (Buffer.from(packedBytes).toString('utf8')).replace(/\0$/, '').split('\x00');
 }
-
-function encodeInt8Array(array: any[]) {
-    return packValues(array, 'b');
-}
-
-function decodeInt8Array(array: Uint8Array | null) {
-    if (array === null) {
-        return null;
-    }
-    return unpackValues(array, 'b');
-}
-
-function encodeUInt8Array(array: any[]) {
-    return packValues(array, 'B');
-}
-
-function decodeUInt8Array(array: Uint8Array | null) {
-    if (array === null) {
-        return null;
-    }
-    return unpackValues(array, 'B');
-}
-
-function encodeInt16Array(array: any[]) {
-    return packValues(array, 'h');
-}
-
-function decodeInt16Array(array: Uint8Array | null) {
-    if (array === null) {
-        return null;
-    }
-    return unpackValues(array, 'h');
-}
-
-function encodeUInt16Array(array: any[]) {
-    return packValues(array, 'H');
-}
-
-function decodeUInt16Array(array: Uint8Array | null) {
-    if (array === null) {
-        return null;
-    }
-    return unpackValues(array, 'H');
-}
-
-function encodeInt32Array(array: any[]) {
-    return packValues(array, 'i');
-}
-
-function decodeInt32Array(array: Uint8Array | null) {
-    if (array === null) {
-        return null;
-    }
-    return unpackValues(array, 'i');
-}
-
-function encodeUInt32Array(array: any[]) {
-    return packValues(array, 'I');
-}
-
-function decodeUInt32Array(array: Uint8Array | null) {
-    if (array === null) {
-        return null;
-    }
-    return unpackValues(array, 'I');
-}
-
-function encodeFloatArray(array: any[]) {
-    return packValues(array, 'f');
-}
-
-function decodeFloatArray(array: Uint8Array | null) {
-    if (array === null) {
-        return null;
-    }
-    return unpackValues(array, 'f');
-}
-
-function encodeDoubleArray(array: any[]) {
-    return packValues(array, 'd');
-}
-
-function decodeDoubleArray(array: Uint8Array | null) {
-    if (array === null) {
-        return null;
-    }
-    return unpackValues(array, 'd');
-}
   
-function unpackValues(packed_bytes: Uint8Array, format_specifier: string): number[] {
+function unpackValues(packed_bytes: Uint8Array, format_specifier: string): (number | Long)[] {
     const data_view = new DataView(packed_bytes.buffer, packed_bytes.byteOffset, packed_bytes.byteLength);
-    const decodeFunc = {
-        'b': data_view.getInt8.bind(data_view),
-        'B': data_view.getUint8.bind(data_view),
-        'h': data_view.getInt16.bind(data_view, 0, true),
-        'H': data_view.getUint16.bind(data_view, 0, true),
-        'i': data_view.getInt32.bind(data_view, 0, true),
-        'I': data_view.getUint32.bind(data_view, 0, true),
-        'f': data_view.getFloat32.bind(data_view, 0, true),
-        'd': data_view.getFloat64.bind(data_view, 0, true),
-    }[format_specifier];
-    if (!decodeFunc) {
-        throw new Error(`Unsupported format specifier: ${format_specifier}`);
-    }
     const values = [];
     const typeSize = getTypeSize(format_specifier);
-    for (let i = 0; i < packed_bytes.length / typeSize; i++) {
-        values.push(decodeFunc(i * typeSize));
+    for (let byteOffset = 0; byteOffset < packed_bytes.length; byteOffset += typeSize) {
+        switch (format_specifier) {
+            case 'b':
+                values.push(data_view.getInt8(byteOffset));
+                break;
+            case 'B':
+                values.push(data_view.getUint8(byteOffset));
+                break;
+            case 'h':
+                values.push(data_view.getInt16(byteOffset, true));
+                break;
+            case 'H':
+                values.push(data_view.getUint16(byteOffset, true));
+                break;
+            case 'i':
+                values.push(data_view.getInt32(byteOffset, true));
+                break;
+            case 'I':
+                values.push(data_view.getUint32(byteOffset, true));
+                break;
+            case 'l':
+                values.push(Long.fromString(data_view.getBigInt64(byteOffset, true).toString(), false));
+                break;
+            case 'L':
+                values.push(Long.fromString(data_view.getBigUint64(byteOffset, true).toString(), true));
+                break;
+            case 'f':
+                values.push(data_view.getFloat32(byteOffset, true));
+                break;
+            case 'd':
+                values.push(data_view.getFloat64(byteOffset, true));
+                break;
+            default:
+                throw new Error(`Unsupported format specifier: ${format_specifier}`);
+        }
     }
     return values;
 }
 
-function packValues(values: any[], format_specifier: string): Uint8Array {
-    const dataView = new DataView(new ArrayBuffer(values.length * getTypeSize(format_specifier)));
-    let byteOffset = 0;
-    for (let i = 0; i < values.length; i++) {
+function packValues(values: Array<number | bigint | Long.Long>, format_specifier: string): Uint8Array {
+    const typeSize = getTypeSize(format_specifier);
+    const dataView = new DataView(new ArrayBuffer(values.length * typeSize));
+    for (let i = 0, byteOffset = 0; i < values.length; i++, byteOffset += typeSize) {
         const value = values[i];
         switch (format_specifier) {
             case 'b':
-                dataView.setInt8(byteOffset, value);
-                byteOffset += 1;
+                dataView.setInt8(byteOffset, value as number);
                 break;
             case 'B':
-                dataView.setUint8(byteOffset, value);
-                byteOffset += 1;
+                dataView.setUint8(byteOffset, value as number);
                 break;
             case 'h':
-                dataView.setInt16(byteOffset, value, true);
-                byteOffset += 2;
+                dataView.setInt16(byteOffset, value as number, true);
                 break;
             case 'H':
-                dataView.setUint16(byteOffset, value, true);
-                byteOffset += 2;
+                dataView.setUint16(byteOffset, value as number, true);
                 break;
             case 'i':
-                dataView.setInt32(byteOffset, value, true);
-                byteOffset += 4;
+                dataView.setInt32(byteOffset, value as number, true);
                 break;
             case 'I':
-                dataView.setUint32(byteOffset, value, true);
-                byteOffset += 4;
+                dataView.setUint32(byteOffset, value as number, true);
+                break;
+            case 'l':
+                dataView.setBigInt64(byteOffset, BigInt(value instanceof Long ? value.toString() : value), true);
+                break;
+            case 'L':
+                dataView.setBigUint64(byteOffset, BigInt(value instanceof Long ? value.toString() : value), true);
                 break;
             case 'f':
-                dataView.setFloat32(byteOffset, value, true);
-                byteOffset += 4;
+                dataView.setFloat32(byteOffset, value as number, true);
                 break;
             case 'd':
-                dataView.setFloat64(byteOffset, value, true);
-                byteOffset += 8;
+                dataView.setFloat64(byteOffset, value as number, true);
                 break;
             default:
                 throw new Error(`Unsupported format specifier: ${format_specifier}`);
@@ -992,14 +942,16 @@ function packValues(values: any[], format_specifier: string): Uint8Array {
 
 function getTypeSize(format_specifier: string): number {
     const sizeMap: {[key: string]: number} = {
-        'b': 1,
-        'B': 1,
-        'h': 2,
-        'H': 2,
-        'i': 4,
-        'I': 4,
-        'f': 4,
-        'd': 8,
+        'b': Int8Array.BYTES_PER_ELEMENT,
+        'B': Uint8Array.BYTES_PER_ELEMENT,
+        'h': Int16Array.BYTES_PER_ELEMENT,
+        'H': Uint16Array.BYTES_PER_ELEMENT,
+        'i': Int32Array.BYTES_PER_ELEMENT,
+        'I': Uint32Array.BYTES_PER_ELEMENT,
+        'l': BigInt64Array.BYTES_PER_ELEMENT,
+        'L': BigUint64Array.BYTES_PER_ELEMENT,
+        'f': Float32Array.BYTES_PER_ELEMENT,
+        'd': Float64Array.BYTES_PER_ELEMENT,
     };
     const size = sizeMap[format_specifier];
     if (!size) {
@@ -1018,23 +970,23 @@ function encodeBooleanArray(booleanArray: boolean[]): Uint8Array {
     for (let i = 0; i < booleanArray.length; i++) {
         const value = booleanArray[i];
         const byteIndex = Math.floor(i / 8);
-        const bitIndex = i % 8;
+        const bitIndex = 7 - i % 8;
         packedBytes[byteIndex] |= (value ? 1 : 0) << bitIndex;
     }
 
     // return the packed bytes preceded by a 4-byte integer representing the number of boolean values
-    const lengthBytes = new Uint8Array(new Uint32Array([booleanArray.length]).buffer);
-    const result = new Uint8Array(lengthBytes.length + packedBytes.length);
-    result.set(lengthBytes);
-    result.set(packedBytes, lengthBytes.length);
+    const result = new Uint8Array(4 + packedBytes.length);
+    const data_view = new DataView(result.buffer);
+    data_view.setUint32(0, booleanArray.length, true); // set the first 4 bytes
+    result.set(packedBytes, 4);
 
     return result;
 }
 
 function decodeBooleanArray(packedBytes: Uint8Array): boolean[] {
+    const data_view = new DataView(packedBytes.buffer, packedBytes.byteOffset, packedBytes.byteLength);
     // extract the length of the boolean array from the first 4 bytes of the packed bytes
-    const lengthBytes = packedBytes.slice(0, 4);
-    const length = new Uint32Array(lengthBytes.buffer)[0];
+    const length = data_view.getUint32(0, true);
 
     // create a boolean array of the appropriate length
     const booleanArray = new Array<boolean>(length);
@@ -1042,7 +994,7 @@ function decodeBooleanArray(packedBytes: Uint8Array): boolean[] {
     // iterate over each bit in the packed bytes and set the corresponding boolean value in the boolean array
     for (let i = 0; i < length; i++) {
         const byteIndex = Math.floor(i / 8);
-        const bitIndex = i % 8;
+        const bitIndex = 7 - i % 8;
         const mask = 1 << bitIndex;
         booleanArray[i] = (packedBytes[byteIndex + 4] & mask) !== 0;
     }
