@@ -470,7 +470,7 @@ void publish_node_birth(struct mosquitto *mosq) {
     // Add the UDT to the payload
     add_metric_to_payload(&nbirth_payload, &metric);
 
-#ifdef SPARKPLUG_DEBUG
+#if SPARKPLUG_DEBUG
     // Print the payload for debug
     print_payload(&nbirth_payload);
 #endif
@@ -551,7 +551,7 @@ void publish_device_birth(struct mosquitto *mosq) {
     // Add the UDT Instance to the payload
     add_metric_to_payload(&dbirth_payload, &metric);
 
-#ifdef SPARKPLUG_DEBUG
+#if SPARKPLUG_DEBUG
     // Print the payload
     print_payload(&dbirth_payload);
 #endif
@@ -591,7 +591,7 @@ void publish_ddata_message(struct mosquitto *mosq) {
     // Note the Metric name 'input/Device Metric1' is not needed because we're using aliases
     add_simple_metric(&ddata_payload, NULL, true, Device_Metric1, METRIC_DATA_TYPE_BOOLEAN, false, false, &ddata_metric_one_value, sizeof(ddata_metric_one_value));
 
-#ifdef SPARKPLUG_DEBUG
+#if SPARKPLUG_DEBUG
     // Print the payload
     print_payload(&ddata_payload);
 #endif

@@ -320,7 +320,7 @@ ssize_t decode_payload(org_eclipse_tahu_protobuf_Payload *payload,
         return -1;
     }
 
-#ifdef SPARKPLUG_DEBUG
+#if SPARKPLUG_DEBUG
     // Print the message data
     print_payload(payload);
 #endif
