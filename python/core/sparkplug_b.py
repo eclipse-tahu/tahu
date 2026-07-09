@@ -191,7 +191,9 @@ def initTemplateMetric(payload, name, alias, templateRef):
 # Helper method for adding metrics to a container which can be a
 # payload or a template
 ######################################################################
-def addMetric(container, name, alias, type, value, timestamp=int(round(time.time() * 1000))):
+def addMetric(container, name, alias, type, value, timestamp=None):
+    if timestamp is None:
+        timestamp = int(round(time.time() * 1000))
     metric = container.metrics.add()
     if name is not None:
         metric.name = name
@@ -325,13 +327,15 @@ def addHistoricalMetric(container, name, alias, type, value):
 # Helper method for adding metrics to a container which can be a
 # payload or a template
 ######################################################################
-def addNullMetric(container, name, alias, type):
+def addNullMetric(container, name, alias, type, timestamp=None):
+    if timestamp is None:
+        timestamp = int(round(time.time() * 1000))
     metric = container.metrics.add()
     if name is not None:
         metric.name = name
     if alias is not None:
         metric.alias = alias
-    metric.timestamp = int(round(time.time() * 1000))
+    metric.timestamp = timestamp
     metric.is_null = True
 
     # print( "Type: " + str(type))
