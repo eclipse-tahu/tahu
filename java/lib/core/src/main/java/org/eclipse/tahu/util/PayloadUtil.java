@@ -16,6 +16,7 @@ package org.eclipse.tahu.util;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.util.List;
+import java.util.Map;
 import java.util.zip.DataFormatException;
 import java.util.zip.Deflater;
 import java.util.zip.Inflater;
@@ -36,6 +37,7 @@ import org.slf4j.LoggerFactory;
 
 import com.fasterxml.jackson.core.JsonParseException;
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonMappingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
@@ -51,30 +53,99 @@ public class PayloadUtil {
 	public static final String METRIC_ALGORITHM = "algorithm";
 
 	/**
+	 * A shared, pre-configured mapper reused when callers opt in via the useCachedMapper flag. Building and
+	 * configuring an ObjectMapper is expensive; reusing one avoids that per-call cost on hot paths. ObjectMapper is
+	 * thread-safe once configured, and DeserializerModule/DeserializerModifier are safe to register once and reuse.
+	 */
+	private static final ObjectMapper CACHED_MAPPER =
+			new ObjectMapper().registerModule(new DeserializerModule(new DeserializerModifier()));
+
+	/**
 	 * Serializes a {@link SparkplugBPayload} instance in to a JSON string.
-	 * 
+	 *
 	 * @param payload a {@link SparkplugBPayload} instance
 	 * @return a JSON string
 	 * @throws JsonProcessingException
 	 */
 	public static String toJsonString(SparkplugBPayload payload) throws JsonProcessingException {
-		ObjectMapper mapper = new ObjectMapper();
-		mapper.registerModule(new DeserializerModule(new DeserializerModifier()));
-		return mapper.writeValueAsString(payload);
+		return toJsonString(payload, false);
+	}
+
+	/**
+	 * Serializes a {@link SparkplugBPayload} instance in to a JSON string.
+	 *
+	 * @param payload a {@link SparkplugBPayload} instance
+	 * @param useCachedMapper if true, reuse a shared pre-configured {@link ObjectMapper} instead of creating a new
+	 *            one per call (faster on hot paths)
+	 * @return a JSON string
+	 * @throws JsonProcessingException
+	 */
+	public static String toJsonString(SparkplugBPayload payload, boolean useCachedMapper)
+			throws JsonProcessingException {
+		return getMapper(useCachedMapper).writeValueAsString(payload);
+	}
+
+	/**
+	 * Converts a {@link SparkplugBPayload} instance into a structured {@link Map} (nested Maps/Lists/primitives)
+	 * matching the JSON representation. Useful for consumers that need the payload as a native object graph rather
+	 * than a JSON string (e.g. inserting into a semi-structured column) - producing the Map directly avoids the
+	 * serialize-to-string-then-reparse round trip.
+	 *
+	 * @param payload a {@link SparkplugBPayload} instance
+	 * @return the payload as a {@link Map} of String to Object
+	 */
+	public static Map<String, Object> toMap(SparkplugBPayload payload) {
+		return toMap(payload, false);
+	}
+
+	/**
+	 * Converts a {@link SparkplugBPayload} instance into a structured {@link Map} (nested Maps/Lists/primitives)
+	 * matching the JSON representation.
+	 *
+	 * @param payload a {@link SparkplugBPayload} instance
+	 * @param useCachedMapper if true, reuse a shared pre-configured {@link ObjectMapper} instead of creating a new
+	 *            one per call (faster on hot paths)
+	 * @return the payload as a {@link Map} of String to Object
+	 */
+	public static Map<String, Object> toMap(SparkplugBPayload payload, boolean useCachedMapper) {
+		return getMapper(useCachedMapper).convertValue(payload, new TypeReference<Map<String, Object>>() {
+		});
 	}
 
 	/**
 	 * Deserializes a JSON string into a {@link SparkplugBPayload} instance.
-	 * 
+	 *
 	 * @param payload a JSON string
 	 * @return a {@link SparkplugBPayload} instance
 	 * @throws JsonProcessingException
 	 */
 	public static SparkplugBPayload fromJsonString(String jsonString)
 			throws JsonParseException, JsonMappingException, IOException {
-		ObjectMapper mapper = new ObjectMapper();
-		mapper.registerModule(new DeserializerModule(new DeserializerModifier()));
-		return mapper.readValue(jsonString, SparkplugBPayload.class);
+		return fromJsonString(jsonString, false);
+	}
+
+	/**
+	 * Deserializes a JSON string into a {@link SparkplugBPayload} instance.
+	 *
+	 * @param payload a JSON string
+	 * @param useCachedMapper if true, reuse a shared pre-configured {@link ObjectMapper} instead of creating a new
+	 *            one per call (faster on hot paths)
+	 * @return a {@link SparkplugBPayload} instance
+	 * @throws JsonProcessingException
+	 */
+	public static SparkplugBPayload fromJsonString(String jsonString, boolean useCachedMapper)
+			throws JsonParseException, JsonMappingException, IOException {
+		return getMapper(useCachedMapper).readValue(jsonString, SparkplugBPayload.class);
+	}
+
+	/*
+	 * Returns the shared cached mapper when useCachedMapper is true, otherwise a new per-call mapper (preserving the
+	 * original behavior for existing callers).
+	 */
+	private static ObjectMapper getMapper(boolean useCachedMapper) {
+		return useCachedMapper
+				? CACHED_MAPPER
+				: new ObjectMapper().registerModule(new DeserializerModule(new DeserializerModifier()));
 	}
 
 	/**

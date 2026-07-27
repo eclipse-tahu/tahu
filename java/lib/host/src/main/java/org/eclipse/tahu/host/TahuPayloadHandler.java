@@ -128,32 +128,32 @@ public class TahuPayloadHandler {
 
 			switch (type) {
 				case NBIRTH:
-					logger.info("Handling NBIRTH from {}", topic.getSparkplugDescriptor());
+					logger.debug("Handling NBIRTH from {}", topic.getSparkplugDescriptor());
 					handleNodeBirth(mqttServerName, messageContext);
 					break;
 				case DBIRTH:
-					logger.info("Handling DBIRTH from {}", topic.getSparkplugDescriptor());
+					logger.debug("Handling DBIRTH from {}", topic.getSparkplugDescriptor());
 					handleDeviceBirth(mqttServerName, messageContext);
 					break;
 				case NDATA:
-					logger.info("Handling NDATA from {}", topic.getSparkplugDescriptor());
+					logger.debug("Handling NDATA from {}", topic.getSparkplugDescriptor());
 					handleNodeData(mqttServerName, messageContext);
 					break;
 				case DDATA:
-					logger.info("Handling DDATA from {}", topic.getSparkplugDescriptor());
+					logger.debug("Handling DDATA from {}", topic.getSparkplugDescriptor());
 					handleDeviceData(mqttServerName, messageContext);
 					break;
 				case NDEATH:
-					logger.info("Handling NDEATH from {}", topic.getSparkplugDescriptor());
+					logger.debug("Handling NDEATH from {}", topic.getSparkplugDescriptor());
 					handleNodeDeath(mqttServerName, messageContext);
 					break;
 				case DDEATH:
-					logger.info("Handling DDEATH from {}", topic.getSparkplugDescriptor());
+					logger.debug("Handling DDEATH from {}", topic.getSparkplugDescriptor());
 					handleDeviceDeath(mqttServerName, messageContext);
 					break;
 
 				default:
-					logger.info("Unknown message with type={} on topic={}", type, topic);
+					logger.debug("Unknown message with type={} on topic={}", type, topic);
 			}
 		} catch (Exception e) {
 			logger.error("Failed to handle payload on topic: {} with payload={}", topic, payload, e);
@@ -412,7 +412,7 @@ public class TahuPayloadHandler {
 		try {
 			Timer rebirthDelayTimer = rebirthTimers.get(edgeNodeDescriptor);
 			if (rebirthDelayTimer == null) {
-				logger.info("Requesting Rebirth from {}", edgeNodeDescriptor);
+				logger.debug("Requesting Rebirth from {}", edgeNodeDescriptor);
 				rebirthDelayTimer = new Timer();
 				rebirthTimers.put(edgeNodeDescriptor, rebirthDelayTimer);
 				rebirthDelayTimer.schedule(new RebirthDelayTask(edgeNodeDescriptor), 5000);
@@ -433,7 +433,7 @@ public class TahuPayloadHandler {
 						logger.debug("On Rebirth request - Current Engine MQTT Server is unchanged: {}",
 								mqttServerName);
 					} else {
-						logger.info("On Rebirth request - MQTT Server has changed: new={}, old={}", mqttServerName,
+						logger.debug("On Rebirth request - MQTT Server has changed: new={}, old={}", mqttServerName,
 								sparkplugEdgeNode.getMqttServerName());
 					}
 					if (hostAppMqttClientId != null && sparkplugEdgeNode.getHostAppMqttClientId() != null
@@ -441,7 +441,7 @@ public class TahuPayloadHandler {
 						logger.debug("On Rebirth request - Current Engine MQTT Client ID is unchanged: {}",
 								hostAppMqttClientId);
 					} else {
-						logger.info("On Rebirth request - MQTT Client ID has changed: new={}, old={}",
+						logger.debug("On Rebirth request - MQTT Client ID has changed: new={}, old={}",
 								hostAppMqttClientId, sparkplugEdgeNode.getHostAppMqttClientId());
 					}
 

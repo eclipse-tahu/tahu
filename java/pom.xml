@@ -20,7 +20,7 @@
     <!-- CI-friendly version. Canonical builds use the default '-SNAPSHOT' (artifacts stay
          1.0.20-SNAPSHOT); per-fork CI overrides -Dchangelist=-<dev>-SNAPSHOT for collision-free
          per-developer artifacts. -->
-    <revision>1.0.20</revision>
+    <revision>1.0.21</revision>
     <changelist></changelist>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <main.basedir>${project.basedir}</main.basedir>
