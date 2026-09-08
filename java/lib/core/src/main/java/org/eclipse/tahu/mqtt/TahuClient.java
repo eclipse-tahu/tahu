@@ -2775,7 +2775,24 @@ public class TahuClient implements MqttCallbackExtended {
 				publishBirthMessage();
 			} else {
 				try {
-					this.publishLwt(true);
+					/*
+					 * Published without waiting for the acknowledgement, unlike every other caller that asks for a
+					 * confirmed death certificate. This runs on Paho's callback thread, and deliveryComplete() -
+					 * the callback that would clear the token and end the wait - is dispatched by that same thread.
+					 * So the wait cannot be satisfied from here: it runs its full keepAlive * 4 quarter seconds -
+					 * keepAlive seconds, 30 by default - and returns having confirmed nothing, with clientLock held
+					 * throughout.
+					 *
+					 * The rule is the one already recorded on birthRecoveryThread, for the same reason and the same
+					 * thread - it was written for publishBirthMessage() and applies just as much to this arm of the
+					 * same if. Moving the wait off clientLock would not help: the confirmation is unobtainable on
+					 * this thread whatever the lock is doing.
+					 *
+					 * setOnlineState() makes the same call and keeps its wait. Reached from an application thread,
+					 * the confirmation can arrive there, so that site costs lock hold time rather than confirming
+					 * nothing - a different fix, and left alone here. See the note on it.
+					 */
+					this.publishLwt(false);
 				} catch (Exception e) {
 					logger.error("Failed to publish the LWT", e);
 				}
@@ -2807,6 +2824,20 @@ public class TahuClient implements MqttCallbackExtended {
 					publishBirthMessage();
 				} else {
 					try {
+						/*
+						 * Left waiting under clientLock, deliberately, unlike the same call in connectComplete().
+						 *
+						 * The difference is who can end the wait. This runs on an application thread, so Paho's
+						 * callback thread stays free to dispatch the deliveryComplete() that clears the token - the
+						 * wait is satisfiable here, where on the callback thread it never was. What it costs is lock
+						 * hold time, up to keepAlive seconds and only when nothing acknowledges, rather than the
+						 * guaranteed full-budget stall that made the other site worth changing.
+						 *
+						 * A confirmed death certificate is worth that, so the fix here is not to drop the wait but to
+						 * take it outside the lock the way disconnectSession() does: publish under clientLock,
+						 * record the token, wait on that token once the lock is released. Pre-existing, and left for
+						 * its own change rather than folded into this one.
+						 */
 						this.publishLwt(true);
 					} catch (Exception e) {
 						logger.error("Failed to publish the LWT when setting the online state", e);

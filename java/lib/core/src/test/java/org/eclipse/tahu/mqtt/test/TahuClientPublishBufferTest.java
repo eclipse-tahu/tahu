@@ -1827,6 +1827,51 @@ public class TahuClientPublishBufferTest {
 	}
 
 	/**
+	 * connectComplete must not wait for an LWT acknowledgement it is itself preventing.
+	 *
+	 * On a client whose online state is false, connectComplete() publishes the death certificate rather than the
+	 * BIRTH, and it asked for delivery to be confirmed. It runs on Paho's callback thread, and deliveryComplete()
+	 * - the callback that clears the token and ends that wait - is dispatched by the same thread. So the wait can
+	 * never be satisfied from here: it runs its full keepAlive * 4 quarter seconds - keepAlive seconds, 30 here -
+	 * and returns having confirmed nothing, with clientLock held for all of it. Deterministic rather than a race.
+	 *
+	 * The rule was already recorded on birthRecoveryThread, for the same thread and the same reason. It was
+	 * written for publishBirthMessage() and never applied to this arm of the same if.
+	 */
+	@Test(
+			timeOut = TIMEOUT_MS * 4)
+	public void connectCompleteDoesNotWaitForAnLwtAcknowledgementOnTheCallbackThread() throws Exception {
+		wire(8, 8);
+		configureLwt(1);
+		set(tahuClient, "onlineState", false);
+
+		// Nothing acknowledges, so a wait can only run to its full budget
+		fakeClient.shutdownAckThread();
+
+		final CountDownLatch returned = new CountDownLatch(1);
+		Thread callbackThread = new Thread(() -> {
+			tahuClient.connectComplete(false, "tcp://localhost:1883");
+			returned.countDown();
+		}, "fake-paho-callback");
+		callbackThread.setDaemon(true);
+		callbackThread.start();
+
+		try {
+			Assert.assertTrue(returned.await(LWT_CONFIRMATION_BUDGET_MS, TimeUnit.MILLISECONDS),
+					"connectComplete() has not returned after " + LWT_CONFIRMATION_BUDGET_MS + "ms. It is waiting "
+							+ "for an LWT acknowledgement that arrives on the thread it is running on, so the wait "
+							+ "can only time out - and it holds clientLock until it does");
+			Assert.assertTrue(fakeClient.publishedTopics().contains(LWT_TOPIC),
+					"The death certificate must still be published - only the wait for it is dropped");
+		} finally {
+			Object monitorThread = get(tahuClient, "connectionMonitorThread");
+			if (monitorThread != null) {
+				((Thread) monitorThread).interrupt();
+			}
+		}
+	}
+
+	/**
 	 * A connect during a teardown must be refused, not raced.
 	 *
 	 * The teardown clears the client field before closing the Paho client, so for the length of that close -
