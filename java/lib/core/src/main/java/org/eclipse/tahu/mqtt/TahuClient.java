@@ -1615,6 +1615,17 @@ public class TahuClient implements MqttCallbackExtended {
 	 * Attempt to connect the TahuClient
 	 */
 	public void connect() {
+		connect(false);
+	}
+
+	/**
+	 * Attempt to connect the TahuClient.
+	 *
+	 * @param deferredReplay true only for a replay armed by a connect that was refused during a teardown. That is
+	 *        the one caller which must be abandoned if the application stopped auto reconnecting while the replay
+	 *        was waiting - every other caller may legitimately connect with autoReconnect false.
+	 */
+	private void connect(boolean deferredReplay) {
 		try {
 			new URI(mqttServerUrl.getMqttServerUrl());
 		} catch (Exception e) {
@@ -1657,6 +1668,24 @@ public class TahuClient implements MqttCallbackExtended {
 			if (isDisconnectInProgress()) {
 				logger.debug("{}: Deferring the connect - a disconnect is in progress", getClientId());
 				deferredConnectPending = true;
+				return;
+			}
+
+			/*
+			 * The last chance to abandon a replay, and the only one taken under this lock. runPendingConnect() and
+			 * its worker both test autoReconnect, but the worker's test is a few bytecodes ahead of this critical
+			 * section - so a shutdown landing in that gap reached a connect with no autoReconnect gate of its own,
+			 * because the getAutoReconnect() && state.inProgress() test below stops testing anything once the flag
+			 * is false. Here the test and the connect it authorises are in one critical section, so nothing can
+			 * interleave between them.
+			 *
+			 * Scoped to the replay, not unconditional. Connecting with autoReconnect false is a supported single
+			 * attempt - ConnectRunnable implements it explicitly, and EdgeClient uses it to try each MQTT server
+			 * definition once - so refusing every caller here would stop those clients connecting at all.
+			 */
+			if (deferredReplay && !autoReconnect) {
+				logger.debug("{}: Dropping the deferred connect - the client is no longer auto reconnecting",
+						getClientId());
 				return;
 			}
 
@@ -1919,10 +1948,10 @@ public class TahuClient implements MqttCallbackExtended {
 		 * own in-progress gate at the cost of one short lived thread, and the pending flag bounds how many can be
 		 * armed at once.
 		 *
-		 * autoReconnect is re-read on the worker as well as here. Between this arming and the worker reaching the
-		 * gate the application can shut the client down completely, and connect() has no autoReconnect check of its
-		 * own on that path - its gate is getAutoReconnect() && state.inProgress(), which stops testing anything once
-		 * autoReconnect is false. This is the last point at which the replay can still be abandoned.
+		 * autoReconnect is re-read on the worker as well as here, and once more inside connect()'s critical section
+		 * - connect(deferredReplay = true). The worker's read is the cheap early-out; the one under the lock is the
+		 * one that closes the window, because between the worker's read and that critical section the application
+		 * can still shut the client down completely.
 		 */
 		Thread worker = new Thread(() -> {
 			if (!autoReconnect) {
@@ -1930,7 +1959,7 @@ public class TahuClient implements MqttCallbackExtended {
 						+ "pending", getClientId());
 				return;
 			}
-			connect();
+			connect(true);
 		}, "TahuDeferredConnect-" + getClientId().getMqttClientId());
 		worker.setDaemon(true);
 		worker.start();

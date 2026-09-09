@@ -1544,8 +1544,11 @@ public class TahuClientPublishBufferTest {
 	 * republishes the retained STATE as online for a host that is down - which every edge node bound to that primary
 	 * host ID believes, and none of them fails over.
 	 *
-	 * connect() cannot catch this itself: its only gate is getAutoReconnect() && state.inProgress(), which stops
-	 * testing anything the moment autoReconnect goes false. The check has to be on the replay path.
+	 * connect()'s own gate cannot catch this: getAutoReconnect() && state.inProgress() stops testing anything the
+	 * moment autoReconnect goes false. The check has to be on the replay path, which is where all three of them are
+	 * - runPendingConnect(), the worker, and connect(deferredReplay = true) under clientLock. This test covers the
+	 * first two; the one under the lock is
+	 * {@link #aReplayIsRefusedUnderTheLockWhenAutoReconnectWasClearedWhileItWaited}.
 	 */
 	@Test(
 			timeOut = TIMEOUT_MS * 2)
@@ -1606,6 +1609,72 @@ public class TahuClientPublishBufferTest {
 			if (connectThread != null) {
 				connectThread.interrupt();
 			}
+		}
+	}
+
+	/**
+	 * A replay must be abandoned even if the shutdown lands after the worker's own check.
+	 *
+	 * runPendingConnect() and its worker both test autoReconnect, but the worker's test is a few bytecodes ahead of
+	 * connect()'s critical section, and connect() had no autoReconnect gate of its own on that path - its
+	 * getAutoReconnect() && state.inProgress() test stops testing anything once the flag is false. A shutdown
+	 * interleaving in that gap therefore still reached the connect, resurrecting a session the application had
+	 * finished with. Very low probability - it has to land in a few bytecodes against a teardown that takes over a
+	 * second - but the outcome is the retained STATE republished as online for a host that is down.
+	 *
+	 * The window itself is not what this asserts: a race that narrow cannot be hit reliably, and a test that tried
+	 * would guard nothing. This drives the replay entry point directly - connect(deferredReplay = true) with
+	 * autoReconnect already false - which is deterministic and fails if the guard is removed.
+	 *
+	 * The scope matters as much as the guard, so {@link #aConnectWithAutoReconnectOffStillConnects} holds the other
+	 * side: an unconditional refusal here would break the single attempt ConnectRunnable implements for
+	 * autoReconnect false, which EdgeClient uses to try each server definition once.
+	 */
+	@Test(
+			timeOut = TIMEOUT_MS)
+	public void aReplayIsRefusedUnderTheLockWhenAutoReconnectWasClearedWhileItWaited() throws Exception {
+		wire(8, 8);
+		tahuClient.setAutoReconnect(false);
+
+		Method connect = TahuClient.class.getDeclaredMethod("connect", boolean.class);
+		connect.setAccessible(true);
+		connect.invoke(tahuClient, true);
+
+		Assert.assertNull(get(tahuClient, "connectRunnable"),
+				"A replay connected after the client stopped auto reconnecting. The worker's own check is ahead of "
+						+ "connect()'s critical section, so the guard inside that section is what closes the window");
+	}
+
+	/**
+	 * ...and a caller that is not a replay must still connect with autoReconnect false.
+	 *
+	 * The other side of the guard above, and the reason it is not the unconditional one-line refusal it could have
+	 * been. Connecting once without auto reconnect is a supported path: ConnectRunnable has an explicit branch for
+	 * it, and EdgeClient sets autoReconnect false and connects immediately, to try each MQTT server definition in
+	 * turn. A guard that refused every caller would stop every edge node connecting at all.
+	 */
+	@Test(
+			timeOut = TIMEOUT_MS)
+	public void aConnectWithAutoReconnectOffStillConnects() throws Exception {
+		wire(8, 8);
+		tahuClient.setAutoReconnect(false);
+
+		try {
+			tahuClient.connect();
+
+			Assert.assertNotNull(get(tahuClient, "connectRunnable"),
+					"A single connect with autoReconnect off must still run - ConnectRunnable implements that "
+							+ "branch and EdgeClient depends on it");
+		} finally {
+			Object connectRunnable = get(tahuClient, "connectRunnable");
+			if (connectRunnable != null) {
+				invoke(connectRunnable, "stopConnectAttempts");
+			}
+			Thread connectThread = (Thread) get(tahuClient, "connectRunnableThread");
+			if (connectThread != null) {
+				connectThread.interrupt();
+			}
+			tahuClient.setAutoReconnect(true);
 		}
 	}
 
