@@ -2030,11 +2030,17 @@ public class TahuClient implements MqttCallbackExtended {
 				 * callback thread runs with the lock released.
 				 */
 				try {
-					this.publishLwtNow(false);
+					/*
+					 * The token this call published, not whatever the field holds. The finally below clears
+					 * lwtDeliveryToken on every path out, so a token captured from the field was already null by the
+					 * time disconnectSession() came to wait on it - and the wait returned on its first comparison,
+					 * logging a confirmation it never obtained. Taking the token from the publish keeps it out of
+					 * reach of the field's lifecycle entirely, and means a call that published nothing has nothing
+					 * to wait on rather than a stale token from an earlier session.
+					 */
+					IMqttDeliveryToken published = this.publishLwtNow(false);
 					if (waitForLwt) {
-						synchronized (lwtDeliveryLock) {
-							awaitLwtDeliveryToken = lwtDeliveryToken;
-						}
+						awaitLwtDeliveryToken = published;
 					}
 				} catch (Exception e) {
 					logger.error("{}: Failed to publish the LWT during disconnect - continuing", getClientId(), e);
@@ -3131,8 +3137,15 @@ public class TahuClient implements MqttCallbackExtended {
 	/**
 	 * Publishes the LWT unconditionally, for the disconnect path that is itself the reason a disconnect is in
 	 * progress. Every other caller goes through {@link #publishLwt(boolean)}.
+	 *
+	 * @return the death certificate this call published, or null if it published nothing - the topic was unset, the
+	 *         client was already down, the payload would not encode, or the publish failed. A caller that means to
+	 *         confirm the certificate must wait on this token rather than on {@link #lwtDeliveryToken}: the field is
+	 *         the live token and is cleared by every teardown, so a wait keyed off it can be satisfied by a publish
+	 *         that is not the one being confirmed - or, as it was, by its own teardown clearing it.
 	 */
-	private void publishLwtNow(boolean waitForLwt) throws MqttException, TahuException {
+	private IMqttDeliveryToken publishLwtNow(boolean waitForLwt) throws MqttException, TahuException {
+		IMqttDeliveryToken published = null;
 		synchronized (clientLock) {
 			boolean clientConnected = client != null && client.isConnected();
 			boolean lwtDeliveryComplete = false;
@@ -3160,18 +3173,18 @@ public class TahuClient implements MqttCallbackExtended {
 						} catch (Exception e) {
 							// Reconnecting cannot fix a payload that will not encode, so there is nothing to recover
 							logger.error("{}: Failed to encode the LWT message on {}", getClientId(), lwtTopic, e);
-							return;
+							return null;
 						}
 
 						/*
 						 * Deliberately outside the encode handler above so a failed publish reaches the caller rather
 						 * than being logged and swallowed.
 						 */
-						lwtDeliveryToken = publishLwtWithFallback(payload);
+						published = lwtDeliveryToken = publishLwtWithFallback(payload);
 					} else {
 						logger.debug("{}: Publishing LWT on {} with qos={} and retain={}", getClientId(), lwtTopic,
 								lwtQoS, lwtRetain);
-						lwtDeliveryToken = publishLwtWithFallback(lwtPayload);
+						published = lwtDeliveryToken = publishLwtWithFallback(lwtPayload);
 					}
 					if (lwtDeliveryToken != null) {
 						logger.debug("{}: published on LWT Topic={}, messageId={}", getClientId(), lwtTopic,
@@ -3203,6 +3216,8 @@ public class TahuClient implements MqttCallbackExtended {
 				logger.debug("{}: Not publishing LWT, client connected state: {}", getClientId(), clientConnected);
 			}
 		}
+
+		return published;
 	}
 
 	private Date getConnectTime() {
@@ -3272,17 +3287,20 @@ public class TahuClient implements MqttCallbackExtended {
 		}
 	}
 
-	/*
-	 * This method waits to ensure that the LWT gets published before graceful disconnect.
-	 * It uses the 'keepAlive' to timeout if the lwtDeliveryToken is not cleared by the deliveryComplete() 
-	 * Paho callback.
-	 */
 	/**
 	 * Waits for one specific death certificate to be acknowledged, with no lock held.
 	 *
-	 * Bound to the token it was given rather than to the field. The field is the live LWT token and another
-	 * teardown can replace it - two teardowns can hold claims at once - so a wait that polled the field could be
-	 * satisfied, or kept waiting, by a publish that is not the one it is confirming.
+	 * Bound to the token it was given, and asks that token whether it is complete rather than watching
+	 * {@link #lwtDeliveryToken}. The field cannot answer this question: it is the live LWT token, every teardown
+	 * clears it on its way out, and another teardown can replace it - two can hold claims at once. Keyed off the
+	 * field this wait returned immediately, because the teardown that published the certificate cleared the field
+	 * before releasing the lock this wait was waiting to be free of.
+	 *
+	 * Paho completes the token when the PUBACK arrives, from its comms thread rather than from the callback thread
+	 * that dispatches {@link #deliveryComplete(IMqttDeliveryToken)}, so the confirmation no longer depends on a
+	 * thread this class has just been restructured to stop blocking. A QoS 0 token completes on write and confirms
+	 * nothing, which is why a downgraded certificate is refused a clean DISCONNECT by lwtPublishSucceeded rather
+	 * than by anything measured here.
 	 *
 	 * Same budget as {@link #isLwtDeliveryComplete()}: keepAlive * 4 quarter seconds. The difference is that
 	 * nothing is blocked while it runs.
@@ -3290,11 +3308,9 @@ public class TahuClient implements MqttCallbackExtended {
 	private void awaitLwtDelivery(IMqttDeliveryToken expected) {
 		int counter = keepAlive * 4;
 		for (int i = 0; i < counter; i++) {
-			synchronized (lwtDeliveryLock) {
-				if (lwtDeliveryToken != expected) {
-					logger.info("{}: LWT delivery confirmation - done waiting", getClientId());
-					return;
-				}
+			if (expected.isComplete()) {
+				logger.info("{}: LWT delivery confirmation - done waiting", getClientId());
+				return;
 			}
 			try {
 				Thread.sleep(250);
@@ -3305,15 +3321,6 @@ public class TahuClient implements MqttCallbackExtended {
 			}
 		}
 
-		/*
-		 * Cleared only if it is still ours. The unconditional clear in isLwtDeliveryComplete() is safe there
-		 * because that runs under clientLock; here another teardown may have published since.
-		 */
-		synchronized (lwtDeliveryLock) {
-			if (lwtDeliveryToken == expected) {
-				lwtDeliveryToken = null;
-			}
-		}
 		logger.warn("{}: LWT delivery confirmation - timeout", getClientId());
 	}
 

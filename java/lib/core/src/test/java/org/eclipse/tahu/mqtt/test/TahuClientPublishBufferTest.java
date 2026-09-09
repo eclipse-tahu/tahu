@@ -1713,6 +1713,10 @@ public class TahuClientPublishBufferTest {
 	 * The wait itself is kept - a graceful disconnect wants the certificate confirmed, unlike the reconnect path,
 	 * which drops it because the session is being replaced anyway. Only the lock is given up, and the wait is bound
 	 * to the token it published rather than to the live field.
+	 *
+	 * This test probes the lock and nothing else. It passes trivially when no wait happens at all, so it is not
+	 * evidence that the wait survives - it did not, and it said nothing. That the wait still happens is
+	 * {@link #aGracefulDisconnectDoesNotReturnUntilTheDeathCertificateIsAcknowledged}.
 	 */
 	@Test(
 			timeOut = TIMEOUT_MS * 4)
@@ -1750,6 +1754,97 @@ public class TahuClientPublishBufferTest {
 				"clientLock was still held " + LOCK_PROBE_BUDGET_MS + "ms into the LWT acknowledgement wait. That "
 						+ "wait runs for keepAlive seconds and is satisfied by Paho's callback thread, which needs "
 						+ "this lock - so it blocks a thread it depends on, and every other operation meanwhile");
+	}
+
+	/**
+	 * A graceful disconnect must actually wait for the death certificate to be acknowledged.
+	 *
+	 * Moving the wait out of clientLock left it keyed off lwtDeliveryToken while detachSession()'s finally cleared
+	 * that field on every path out - so awaitLwtDelivery() compared a null field against the non-null token just
+	 * published, returned on its first iteration, and logged a confirmation it had not obtained. Deterministic, not
+	 * a race: the field was always null by then, because the same thread had just run the finally that cleared it.
+	 *
+	 * The outcome was never read - it goes to a local and a trace log - so nothing escalated wrongly. What was lost
+	 * is time: up to keepAlive seconds for the retained QoS 1 certificate to leave Paho's outbound queue, collapsed
+	 * to closeDetachedSession()'s unconditional second. Against a server that has stopped acknowledging - the case
+	 * this whole path exists for - the socket then goes while the PUBLISH is still queued, and the server sees a
+	 * graceful DISCONNECT and suppresses the Will it holds from connect(). HostApplication.shutdown() is the one
+	 * in-tree caller that asks for the confirmation, so a host that has finished shutting down can leave a retained
+	 * STATE of online: true standing for every edge node bound to it.
+	 *
+	 * One-sided deliberately: it asserts the disconnect has NOT returned yet. A correct wait runs for keepAlive
+	 * seconds - 30 here - so no amount of load can turn this green, while the defect returns in about a second.
+	 */
+	@Test(
+			timeOut = TIMEOUT_MS * 4)
+	public void aGracefulDisconnectDoesNotReturnUntilTheDeathCertificateIsAcknowledged() throws Exception {
+		wire(8, 8);
+		configureLwt(1);
+
+		// Nothing acknowledges it, so the token never completes and the wait can only run to its full budget
+		fakeClient.shutdownAckThread();
+
+		final CountDownLatch returned = new CountDownLatch(1);
+		Thread disconnector = new Thread(() -> {
+			try {
+				tahuClient.disconnect(0, 1, false, true, true);
+			} catch (Exception e) {
+				// Reported by the assertions below
+			} finally {
+				returned.countDown();
+			}
+		}, "disconnector");
+		disconnector.setDaemon(true);
+		disconnector.start();
+
+		boolean finished = returned.await(LWT_CONFIRMATION_BUDGET_MS, TimeUnit.MILLISECONDS);
+
+		/*
+		 * Unwedged before the assertion, not after, so a failing run does not leave the rest of the keepAlive
+		 * budget behind it. awaitLwtDelivery() returns on the interrupt.
+		 */
+		disconnector.interrupt();
+		disconnector.join(TIMEOUT_MS);
+
+		Assert.assertTrue(fakeClient.publishedTopics().contains(LWT_TOPIC),
+				"Precondition: the death certificate must have been published, or there is nothing to confirm");
+		Assert.assertFalse(finished,
+				"disconnect(waitForLwt=true) returned within " + LWT_CONFIRMATION_BUDGET_MS + "ms with nothing "
+						+ "acknowledging the death certificate. The confirmation wait is a no-op: it compares the "
+						+ "token it published against lwtDeliveryToken, which detachSession()'s finally has already "
+						+ "cleared, so it returns on its first iteration and logs a confirmation it never obtained");
+	}
+
+	/**
+	 * ...and must stop waiting once the acknowledgement arrives.
+	 *
+	 * The other side of the test above, and the reason the fix binds the wait to the token rather than removing the
+	 * clear that broke it: a wait that cannot observe the acknowledgement would spend keepAlive seconds on every
+	 * graceful disconnect. Paho completes the token when the PUBACK lands, from its comms thread rather than the
+	 * callback thread that dispatches deliveryComplete(), so the confirmation does not depend on a thread this
+	 * class has been restructured to stop blocking.
+	 *
+	 * This one does not prove the wait happens - it passes against a wait that returns immediately, which is
+	 * exactly what the test above is for. It proves the wait ends.
+	 */
+	@Test(
+			timeOut = TIMEOUT_MS * 4)
+	public void aGracefulDisconnectStopsWaitingOnceTheDeathCertificateIsAcknowledged() throws Exception {
+		wire(8, 8);
+		configureLwt(1);
+
+		// The acknowledgement the test above withholds
+		fakeClient.ackOnSeparateThread(tahuClient);
+
+		long start = System.currentTimeMillis();
+		tahuClient.disconnect(0, 1, false, true, true);
+		long elapsed = System.currentTimeMillis() - start;
+
+		Assert.assertTrue(fakeClient.publishedTopics().contains(LWT_TOPIC),
+				"Precondition: the death certificate must have been published");
+		Assert.assertTrue(elapsed < LWT_CONFIRMATION_BUDGET_MS,
+				"The disconnect took " + elapsed + "ms with the death certificate acknowledged. The wait must end "
+						+ "on the acknowledgement rather than running its keepAlive-second budget out");
 	}
 
 	/**
@@ -2875,11 +2970,19 @@ public class TahuClientPublishBufferTest {
 			}
 
 			FakeDeliveryToken token = new FakeDeliveryToken(nextMessageId.getAndIncrement());
+			if (qos == 0) {
+				// There is no PUBACK for QoS 0, so Paho completes the token as soon as it is written
+				token.markComplete();
+			}
 			TahuClient target = ackTarget;
 			ExecutorService executor = ackExecutor;
 			if (target != null && executor != null && qos > 0 && !executor.isShutdown()) {
 				try {
-					executor.submit(() -> target.deliveryComplete(token));
+					executor.submit(() -> {
+						// Completed before the callback, as Paho does: the PUBACK is what both are made of
+						token.markComplete();
+						target.deliveryComplete(token);
+					});
 				} catch (RejectedExecutionException ignored) {
 					// shutting down
 				}
@@ -2888,15 +2991,27 @@ public class TahuClientPublishBufferTest {
 		}
 	}
 
-	/** Minimal IMqttDeliveryToken - only getMessageId() is meaningful to TahuClient. */
+	/**
+	 * Minimal IMqttDeliveryToken - getMessageId() and completion are what TahuClient reads.
+	 *
+	 * isComplete() used to answer true unconditionally, which was harmless while nothing asked. awaitLwtDelivery()
+	 * now asks it, so a token that always claims completion would make any test of that wait vacuous - it would
+	 * pass against a wait that never waits, which is the defect the wait was found to have. Completion mirrors
+	 * Paho: a QoS 0 publish completes on write, a QoS 1 publish when its acknowledgement is dispatched.
+	 */
 	private static class FakeDeliveryToken implements IMqttDeliveryToken {
 
 		private final int messageId;
+		private volatile boolean complete;
 		private Object userContext;
 		private IMqttActionListener actionCallback;
 
 		private FakeDeliveryToken(int messageId) {
 			this.messageId = messageId;
+		}
+
+		private void markComplete() {
+			this.complete = true;
 		}
 
 		@Override
@@ -2919,7 +3034,7 @@ public class TahuClientPublishBufferTest {
 
 		@Override
 		public boolean isComplete() {
-			return true;
+			return complete;
 		}
 
 		@Override
