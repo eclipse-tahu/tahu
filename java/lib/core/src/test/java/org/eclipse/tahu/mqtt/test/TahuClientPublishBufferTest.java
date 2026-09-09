@@ -547,7 +547,8 @@ public class TahuClientPublishBufferTest {
 		// No releasePermits() anywhere - the buffer can only drain if ACKs are being processed
 		awaitBufferDepth(0, TIMEOUT_MS * 4);
 
-		Assert.assertEquals(fakeClient.publishedTopics(), expected, "Every message must be delivered, in publish order");
+		Assert.assertEquals(fakeClient.publishedTopics(), expected,
+				"Every message must be delivered, in publish order");
 		awaitPermits(window, TIMEOUT_MS);
 	}
 
@@ -599,7 +600,8 @@ public class TahuClientPublishBufferTest {
 		startDrain();
 		releasePermits(threads * perThread);
 		awaitBufferDepth(0);
-		Assert.assertEquals(fakeClient.publishedTopics().size(), threads * perThread, "Every message must be delivered");
+		Assert.assertEquals(fakeClient.publishedTopics().size(), threads * perThread,
+				"Every message must be delivered");
 	}
 
 	// ------------------------------------------------------------------------------------------------------------
@@ -2808,7 +2810,8 @@ public class TahuClientPublishBufferTest {
 			}
 			Thread.sleep(10);
 		}
-		Assert.fail("Buffer depth never reached " + expected + " (currently " + tahuClient.getPublishBufferDepth() + ")");
+		Assert.fail("Buffer depth never reached " + expected + " (currently "
+				+ tahuClient.getPublishBufferDepth() + ")");
 	}
 
 	/** Full dump with monitor ownership, plus explicit deadlock detection, for when the stress test wedges. */

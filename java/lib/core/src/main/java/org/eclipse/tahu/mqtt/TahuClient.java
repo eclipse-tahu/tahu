@@ -233,8 +233,8 @@ public class TahuClient implements MqttCallbackExtended {
 	/*
 	 * The FIFO publish buffer, the lock guarding both it and publish ordering, and the thread that drains it.
 	 *
-	 * publishOrderLock guards the decision "publish now or queue" so that, in normal operation, no message overtakes one
-	 * already queued.
+	 * publishOrderLock guards the decision "publish now or queue" so that, in normal operation, no message
+	 * overtakes one already queued.
 	 *
 	 * KNOWN GAP, accepted deliberately: when a buffered send fails, the lock is released between the failed publish and
 	 * the requeueOrDrop() that puts the message back at the head, so a concurrent publisher can see an empty buffer and
@@ -794,8 +794,8 @@ public class TahuClient implements MqttCallbackExtended {
 			}
 		} catch (TahuException e) {
 			/*
-			 * No InterruptedException handler here, deliberately. 3.x added one to distinguish an interrupt that is part
-			 * of an intentional disconnect from one that silently dropped a message - but that only mattered while
+			 * No InterruptedException handler here, deliberately. 3.x added one to distinguish an interrupt that is
+			 * part of an intentional disconnect from one that silently dropped a message - but that only mattered while
 			 * publish() could block. The interruptible semaphore.acquire() is gone, replaced by a non-blocking
 			 * tryAcquire() plus the publish buffer, so nothing in the try above can throw InterruptedException and Java
 			 * would reject a catch for it. The failure mode that change guarded against cannot arise on this path.
@@ -947,7 +947,8 @@ public class TahuClient implements MqttCallbackExtended {
 	 *
 	 * INVARIANT: only QoS > 0 messages are ever buffered. The drain thread relies on this - it takes a permit before
 	 * dequeuing, so a buffered QoS 0 message (which needs no permit and is never ACKed) would stall the buffer for as
-	 * long as the in-flight window stayed exhausted. TahuClientPublishBufferTest#bufferNeverHoldsQos0Messages guards it.
+	 * long as the in-flight window stayed exhausted.
+	 * TahuClientPublishBufferTest#bufferNeverHoldsQos0Messages guards it.
 	 *
 	 * A message is also rejected when no drain thread owns the buffer, for the same reason as a full one: nothing
 	 * would ever send it. That state is not reachable during a live session - connect() starts the drain before the
@@ -1330,8 +1331,8 @@ public class TahuClient implements MqttCallbackExtended {
 	}
 
 	/*
-	 * Drains the publish buffer head first as in-flight permits become available. FIFO on the happy path only - a failed
-	 * send can be overtaken while it is re-queued.
+	 * Drains the publish buffer head first as in-flight permits become available. FIFO on the happy path only -
+	 * a failed send can be overtaken while it is re-queued.
 	 *
 	 * Permits are acquired WITHOUT holding publishOrderLock - only the dequeue-and-publish step takes it - so this
 	 * thread can never block a caller or deliveryComplete().
