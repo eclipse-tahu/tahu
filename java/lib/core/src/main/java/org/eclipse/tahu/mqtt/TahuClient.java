@@ -2069,7 +2069,25 @@ public class TahuClient implements MqttCallbackExtended {
 					 * to wait on rather than a stale token from an earlier session.
 					 */
 					IMqttDeliveryToken published = this.publishLwtNow(false);
-					if (waitForLwt) {
+
+					/*
+					 * Only an acknowledgeable certificate is worth waiting for. lwtPublishSucceeded is false when the
+					 * publish went out downgraded to QoS 0, and the block below suppresses the clean DISCONNECT on
+					 * that same flag - so without this gate the code refuses to send a DISCONNECT because the
+					 * certificate carries no guarantee, then waits keepAlive seconds for a confirmation of it.
+					 *
+					 * Waiting on a QoS 0 token is worse than pointless. Paho marks such a token pendingComplete on
+					 * write but assigns completed - what isComplete() returns - only in Token.notifyComplete(),
+					 * reached for a QoS 0 publish solely through CommsCallback's completion queue, on the callback
+					 * thread. The downgrade happens precisely when the in-flight window is exhausted or the buffer is
+					 * non-empty, and both clear only through deliveryComplete() on that same thread: the state that
+					 * causes the downgrade is the state in which the token cannot complete.
+					 *
+					 * lwtQoS is tested as well as the flag. A client configured with lwtQoS == 0 never enters
+					 * publishLwtAtQos0(), so lwtDowngradedToQos0 stays false and lwtPublishSucceeded stays true - the
+					 * flag alone would let a QoS 0 token through on the one path that never downgraded at all.
+					 */
+					if (waitForLwt && lwtPublishSucceeded && lwtQoS > MqttOperatorDefs.QOS0) {
 						awaitLwtDeliveryToken = published;
 					}
 				} catch (Exception e) {
@@ -3328,9 +3346,14 @@ public class TahuClient implements MqttCallbackExtended {
 	 *
 	 * Paho completes the token when the PUBACK arrives, from its comms thread rather than from the callback thread
 	 * that dispatches {@link #deliveryComplete(IMqttDeliveryToken)}, so the confirmation no longer depends on a
-	 * thread this class has just been restructured to stop blocking. A QoS 0 token completes on write and confirms
-	 * nothing, which is why a downgraded certificate is refused a clean DISCONNECT by lwtPublishSucceeded rather
-	 * than by anything measured here.
+	 * thread this class has just been restructured to stop blocking.
+	 *
+	 * That holds only for QoS > 0. A QoS 0 token is marked pendingComplete on write, but the completed flag
+	 * isComplete() returns is assigned only in Token.notifyComplete(), which a QoS 0 publish reaches solely through
+	 * CommsCallback's completion queue - on the callback thread. Such a token therefore confirms nothing and cannot
+	 * be relied on to end the wait either, so a certificate that is at QoS 0 by downgrade or by configuration is
+	 * never waited on at all: detachSession() gates the capture, and lwtPublishSucceeded - not anything measured
+	 * here - is what refuses it a clean DISCONNECT.
 	 *
 	 * Same budget as {@link #isLwtDeliveryComplete()}: keepAlive * 4 quarter seconds. The difference is that
 	 * nothing is blocked while it runs.

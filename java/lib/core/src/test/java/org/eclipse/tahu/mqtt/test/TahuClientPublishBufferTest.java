@@ -1919,6 +1919,116 @@ public class TahuClientPublishBufferTest {
 	}
 
 	/**
+	 * A death certificate that went out downgraded to QoS 0 must not be waited on at all.
+	 *
+	 * publishLwtWithFallback() drops to QoS 0 when the in-flight window is exhausted or the buffer is non-empty.
+	 * detachSession() then clears sendDisconnectPacket off !lwtPublishSucceeded, because a QoS 0 certificate
+	 * carries no guarantee - and captured the token for the wait anyway, so the same fact refused the DISCONNECT
+	 * and was ignored by the confirmation, which ran the full keepAlive budget on a certificate already judged
+	 * worthless.
+	 *
+	 * A QoS 0 token cannot end that wait either. Paho marks it pendingComplete on write but assigns the completed
+	 * flag isComplete() reads only in Token.notifyComplete(), reached for a QoS 0 publish solely through
+	 * CommsCallback's completion queue, on the callback thread. The downgrade triggers - no permits, or a
+	 * non-empty buffer - clear only through deliveryComplete() on that same thread, so the state that causes the
+	 * downgrade is the state in which the token never completes. At the default keepAlive that is a 30 second
+	 * stall on HostApplication.shutdown(), the one in-tree caller asking for the confirmation.
+	 *
+	 * Not a race: with no permits the downgrade is certain, and with the ack thread stopped the token can never
+	 * complete, so a wait that happens at all runs to its full budget.
+	 */
+	@Test(
+			timeOut = TIMEOUT_MS * 4)
+	public void aDeathCertificateDowngradedToQos0IsNotWaitedOn() throws Exception {
+		// No permits, so the QoS 1 publish cannot go out and publishLwtWithFallback() downgrades
+		wire(0, 8);
+		configureLwt(1);
+
+		// The callback thread is not draining, so a QoS 0 token never reports complete
+		fakeClient.shutdownAckThread();
+
+		final CountDownLatch returned = new CountDownLatch(1);
+		Thread disconnector = new Thread(() -> {
+			try {
+				tahuClient.disconnect(0, 1, false, true, true);
+			} catch (Exception e) {
+				// Reported by the assertions below
+			} finally {
+				returned.countDown();
+			}
+		}, "disconnector");
+		disconnector.setDaemon(true);
+		disconnector.start();
+
+		boolean finished = returned.await(LWT_CONFIRMATION_BUDGET_MS, TimeUnit.MILLISECONDS);
+
+		// Unwedged before the assertions, so a failing run does not leave the rest of the budget behind it
+		disconnector.interrupt();
+		disconnector.join(TIMEOUT_MS);
+
+		Assert.assertTrue(fakeClient.publishedTopics().contains(LWT_TOPIC),
+				"Precondition: the death certificate must have been published, or there is nothing to wait on");
+		Assert.assertTrue((Boolean) get(tahuClient, "lwtDowngradedToQos0"),
+				"Precondition: the certificate must have been downgraded to QoS 0, or this tests nothing");
+		Assert.assertTrue(finished,
+				"disconnect(waitForLwt=true) did not return within " + LWT_CONFIRMATION_BUDGET_MS + "ms after the "
+						+ "death certificate was downgraded to QoS 0. The capture is gated on waitForLwt alone, so "
+						+ "a certificate whose QoS 0 downgrade already suppressed the clean DISCONNECT is still "
+						+ "waited on - for keepAlive seconds, on a token only the stalled callback thread can "
+						+ "complete");
+	}
+
+	/**
+	 * ...and neither must one configured at QoS 0 in the first place.
+	 *
+	 * The companion above, and the reason the gate tests lwtQoS rather than lwtPublishSucceeded alone.
+	 * lwtPublishSucceeded is derived as !lwtDowngradedToQos0, and a client configured with lwtQoS == 0 never
+	 * reaches publishLwtAtQos0() - publishLwtWithFallback() tests lwtQoS > QOS0 before taking that branch. So the
+	 * flag stays false, lwtPublishSucceeded stays true, and a gate on the flag alone would still wait on a QoS 0
+	 * token: the one path that never downgraded is the one such a gate cannot see.
+	 *
+	 * The precondition asserts exactly that - the downgrade flag is false here, so this reaches the wait by a
+	 * different route than the test above.
+	 */
+	@Test(
+			timeOut = TIMEOUT_MS * 4)
+	public void aDeathCertificateConfiguredAtQos0IsNotWaitedOn() throws Exception {
+		// Permits available: nothing forces a downgrade, so this is the statically configured QoS 0 path
+		wire(8, 8);
+		configureLwt(0);
+
+		fakeClient.shutdownAckThread();
+
+		final CountDownLatch returned = new CountDownLatch(1);
+		Thread disconnector = new Thread(() -> {
+			try {
+				tahuClient.disconnect(0, 1, false, true, true);
+			} catch (Exception e) {
+				// Reported by the assertions below
+			} finally {
+				returned.countDown();
+			}
+		}, "disconnector");
+		disconnector.setDaemon(true);
+		disconnector.start();
+
+		boolean finished = returned.await(LWT_CONFIRMATION_BUDGET_MS, TimeUnit.MILLISECONDS);
+
+		disconnector.interrupt();
+		disconnector.join(TIMEOUT_MS);
+
+		Assert.assertTrue(fakeClient.publishedTopics().contains(LWT_TOPIC),
+				"Precondition: the death certificate must have been published, or there is nothing to wait on");
+		Assert.assertFalse((Boolean) get(tahuClient, "lwtDowngradedToQos0"),
+				"Precondition: nothing may have downgraded this publish - the point is the configured QoS 0 path");
+		Assert.assertTrue(finished,
+				"disconnect(waitForLwt=true) did not return within " + LWT_CONFIRMATION_BUDGET_MS + "ms for an LWT "
+						+ "configured at QoS 0. lwtPublishSucceeded is true here because nothing downgraded, so a "
+						+ "gate on that flag alone still waits - on a token only the stalled callback thread can "
+						+ "complete");
+	}
+
+	/**
 	 * A correction to an unbalanced release must still run the replay it was about to run.
 	 *
 	 * releaseTeardownClaim() floors the count at zero when a caller unbalances it, and the replay is gated on the
@@ -3042,19 +3152,34 @@ public class TahuClientPublishBufferTest {
 			}
 
 			FakeDeliveryToken token = new FakeDeliveryToken(nextMessageId.getAndIncrement());
-			if (qos == 0) {
-				// There is no PUBACK for QoS 0, so Paho completes the token as soon as it is written
-				token.markComplete();
-			}
 			TahuClient target = ackTarget;
 			ExecutorService executor = ackExecutor;
-			if (target != null && executor != null && qos > 0 && !executor.isShutdown()) {
+			if (executor != null && !executor.isShutdown()) {
 				try {
-					executor.submit(() -> {
-						// Completed before the callback, as Paho does: the PUBACK is what both are made of
-						token.markComplete();
-						target.deliveryComplete(token);
-					});
+					if (qos > 0) {
+						if (target != null) {
+							executor.submit(() -> {
+								// Completed before the callback, as Paho does: the PUBACK is what both are made of
+								token.markComplete();
+								target.deliveryComplete(token);
+							});
+						}
+					} else {
+						/*
+						 * Deferred, not inline. This used to complete a QoS 0 token on the spot, commented "Paho
+						 * completes the token as soon as it is written" - which is backwards, and encoding it here
+						 * made any test of a QoS 0 wait vacuous. Paho's notifySent() marks such a token
+						 * pendingComplete and queues asyncOperationComplete; the completed flag isComplete() reads
+						 * is assigned only by Token.notifyComplete(), reached through CommsCallback's queue on the
+						 * callback thread. Routing it through the ack executor models that thread, so shutting the
+						 * executor down models a callback thread that is not draining - the state a downgrade
+						 * correlates with, and the one in which such a token never completes.
+						 *
+						 * Only completion is modelled here, not the deliveryComplete() fan-out Paho also performs
+						 * from that thread: isComplete() is the only thing TahuClient reads off a QoS 0 token.
+						 */
+						executor.submit(token::markComplete);
+					}
 				} catch (RejectedExecutionException ignored) {
 					// shutting down
 				}
@@ -3069,7 +3194,9 @@ public class TahuClientPublishBufferTest {
 	 * isComplete() used to answer true unconditionally, which was harmless while nothing asked. awaitLwtDelivery()
 	 * now asks it, so a token that always claims completion would make any test of that wait vacuous - it would
 	 * pass against a wait that never waits, which is the defect the wait was found to have. Completion mirrors
-	 * Paho: a QoS 0 publish completes on write, a QoS 1 publish when its acknowledgement is dispatched.
+	 * Paho: a QoS 1 publish completes when its acknowledgement is dispatched, and a QoS 0 publish only when the
+	 * thread standing in for Paho's callback thread drains it - not on write, which is what the double claimed
+	 * before and what made the QoS 0 path untestable.
 	 */
 	private static class FakeDeliveryToken implements IMqttDeliveryToken {
 
