@@ -2048,7 +2048,21 @@ public class TahuClientPublishBufferTest {
 			// One more release than there were claims - the case the correction exists for
 			invoke(tahuClient, "releaseTeardownClaim");
 
-			Assert.assertEquals(teardowns.get(), 0, "The count must be floored at zero, not left negative");
+			/*
+			 * Not an equality check on zero, deliberately. The replay this release fires takes its own claim
+			 * inside connect(), so the count legitimately becomes 1 the moment that worker gets clientLock - which
+			 * it is already blocked waiting for, because runPendingConnect() is called with the lock still held.
+			 * Asserting == 0 here races the worker and fails whenever it wins; on an idle machine the test thread
+			 * nearly always wins, on a loaded build server it does not.
+			 *
+			 * What the correction actually has to guarantee is that the count is never left negative. That the
+			 * replay ran is the assertion below, and that is the one that fails against the defect this test
+			 * exists for - a correction that fixes the field but leaves the local negative corrects the counter to
+			 * zero, so no assertion on the counter can see it.
+			 */
+			Assert.assertTrue(teardowns.get() >= 0,
+					"The count must never be left negative - releaseTeardownClaim() corrects an unbalanced release "
+							+ "by flooring it at zero. Found " + teardowns.get());
 			awaitTrue(() -> {
 				try {
 					return get(tahuClient, "connectRunnable") != null;
