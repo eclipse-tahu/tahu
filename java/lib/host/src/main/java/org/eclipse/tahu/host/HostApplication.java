@@ -203,7 +203,16 @@ public class HostApplication implements CommandPublisher {
 	public void setOnlineState(boolean onlineState) {
 		tahuHostCallback.setOnlineState(onlineState);
 		for (TahuClient tahuClient : tahuClients.values()) {
-			tahuClient.setOnlineState(onlineState);
+			/*
+			 * Per client, so one that cannot take the state change does not abort it for the rest. These clients are
+			 * independent MQTT server connections and a failure on one says nothing about the others.
+			 */
+			try {
+				tahuClient.setOnlineState(onlineState);
+			} catch (Exception e) {
+				logger.error("Failed to set the online state to {} on {} - continuing", onlineState,
+						tahuClient.getClientId(), e);
+			}
 		}
 	}
 
