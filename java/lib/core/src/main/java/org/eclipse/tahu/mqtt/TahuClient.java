@@ -354,6 +354,34 @@ public class TahuClient implements MqttCallbackExtended {
 	// Whether or not the BIRTH should be published on connect and controls the STATE of the client
 	private boolean onlineState;
 
+	/*
+	 * The BIRTH is withheld until every re-subscribe made in connectComplete() has been granted. A Host Application's
+	 * ONLINE STATE tells Edge Nodes it can receive their data - Transmission flushes its store and forward history on
+	 * it - so announcing a session whose subscriptions the MQTT Server is about to deny, and which is then forcibly
+	 * disconnected, loses that history. See IMM-5498.
+	 *
+	 * A generation rather than a flag or a session identity. Paho's automatic reconnect reuses the same client object,
+	 * so identity cannot tell one connection from the next, and a late SUBACK from an earlier connection must not
+	 * confirm the current one. Bumped under clientLock at the top of every connectComplete(); volatile so
+	 * isSubscriptionsConfirmed() can read both without the lock.
+	 */
+	private volatile long connectGeneration;
+	private volatile long subscriptionsConfirmedGeneration = -1;
+
+	/*
+	 * Whether a subscription the MQTT Server refuses on a live connection cycles that connection, as one refused in
+	 * connectComplete() always has. Off by default, so subscribe() keeps returning the granted QoS for the caller to
+	 * judge; an application whose subscriptions are all-or-nothing opts in. See IMM-5498.
+	 */
+	private volatile boolean reconnectOnRefusedSubscription;
+
+	/*
+	 * How long connectComplete() waits for its SUBACKs before cycling the connection. A SUBACK that never arrives
+	 * would otherwise leave the BIRTH withheld for the life of the connection: connected, never ONLINE, and never
+	 * retried. 0 means the default, keepAlive * 2 seconds or 60 seconds when keepAlive is disabled. See IMM-5498.
+	 */
+	private volatile long subAckTimeoutMillis;
+
 	// volatile: written in connect() under messageLock, but read under publishOrderLock in publishOrBuffer() and
 	// with no lock at all by the publish buffer drain thread. Without volatile there is no happens-before edge to
 	// those readers, so a reconnect's replacement instance may not be seen promptly.
@@ -633,6 +661,61 @@ public class TahuClient implements MqttCallbackExtended {
 		} else {
 			return false;
 		}
+	}
+
+	/**
+	 * Whether every subscription made on the current connection has been granted by the MQTT Server. Until it has, the
+	 * BIRTH is withheld, and an application that publishes its own ONLINE STATE outside
+	 * {@link #publishBirthMessage()} must hold it back as well.
+	 *
+	 * Unlike {@link #isConnectedAndResubscribed()}, which is true once the subscribe requests have been sent, this is
+	 * true only once their SUBACKs have arrived with the requested QoS.
+	 *
+	 * @return true if the subscriptions on the current connection have all been confirmed
+	 */
+	public boolean isSubscriptionsConfirmed() {
+		return subscriptionsConfirmedGeneration == connectGeneration;
+	}
+
+	/**
+	 * Sets whether a subscription refused by the MQTT Server on a live connection cycles the connection.
+	 *
+	 * A subscription refused while connectComplete() re-subscribes always cycles the connection, and the refused
+	 * subscription is kept, so it is retried - and refused - on every reconnect until the MQTT Server allows it. With
+	 * this set, one refused by {@link #subscribe(String, int)} or {@link #subscribe(String[], int[])} on a live
+	 * connection does the same, rather than leaving the client connected and announced ONLINE without it.
+	 *
+	 * @param reconnectOnRefusedSubscription true to cycle the connection on a refused subscription
+	 */
+	public void setReconnectOnRefusedSubscription(boolean reconnectOnRefusedSubscription) {
+		this.reconnectOnRefusedSubscription = reconnectOnRefusedSubscription;
+	}
+
+	public boolean isReconnectOnRefusedSubscription() {
+		return reconnectOnRefusedSubscription;
+	}
+
+	/**
+	 * Sets how long the SUBACKs for the subscriptions made on connecting may take before the connection is cycled.
+	 *
+	 * @param subAckTimeoutMillis the timeout in milliseconds, or 0 for the default of keepAlive * 2 seconds (60
+	 *            seconds when keepAlive is disabled)
+	 */
+	public void setSubAckTimeout(long subAckTimeoutMillis) {
+		this.subAckTimeoutMillis = subAckTimeoutMillis;
+	}
+
+	/**
+	 * Returns how long the SUBACKs for the subscriptions made on connecting may take before the connection is cycled.
+	 *
+	 * @return the timeout in milliseconds
+	 */
+	public long getSubAckTimeout() {
+		long timeout = subAckTimeoutMillis;
+		if (timeout > 0) {
+			return timeout;
+		}
+		return keepAlive > 0 ? keepAlive * 2000L : 60000L;
 	}
 
 	public long getConnectDuration() throws TahuException {
@@ -1459,6 +1542,9 @@ public class TahuClient implements MqttCallbackExtended {
 						int[] grantedQos = token.getGrantedQos();
 						logger.debug("{}: Granted QoS for subcription on {}: {}", getClientId(), topic, grantedQos[0]);
 						if (grantedQos != null && grantedQos.length == 1) {
+							if (grantedQos[0] != qos) {
+								onSubscriptionRefused(topic);
+							}
 							return grantedQos[0];
 						} else {
 							String errorMessage = getClientId() + ": server " + getMqttServerName()
@@ -1506,6 +1592,7 @@ public class TahuClient implements MqttCallbackExtended {
 								if (grantedQos[i] == qos[i]) {
 									subscriptions.put(topics[i], qos[i]);
 								} else {
+									onSubscriptionRefused(topics[i]);
 									throw new TahuException(TahuErrorCode.NOT_AUTHORIZED,
 											"Failed to subscribe to " + topics[i]);
 								}
@@ -2698,6 +2785,7 @@ public class TahuClient implements MqttCallbackExtended {
 			return;
 		}
 
+		boolean confirmedOnConnect = false;
 		synchronized (clientLock) {
 			if (reconnect) {
 				logger.debug("{}: SUCCESSFULLY RECONNECTED to {}", getClientId(), getMqttServerUrl());
@@ -2717,6 +2805,9 @@ public class TahuClient implements MqttCallbackExtended {
 
 			logger.info("{}: Connected to {}", getClientId(), getMqttServerUrl());
 
+			// A new connection - nothing on it has been confirmed yet, whatever an earlier one achieved
+			final long generation = ++connectGeneration;
+
 			// Call connectComplete() with the callback
 			getCallback().connectComplete(reconnect, getMqttServerName(), getMqttServerUrl(), getClientId());
 
@@ -2726,6 +2817,10 @@ public class TahuClient implements MqttCallbackExtended {
 				int totalCount = subscriptions.size();
 				int subscribedCount = 0;
 				ArrayList<String> topicsList = new ArrayList<String>(subscriptions.keySet());
+
+				// One per SUBACK still to arrive. The last one to arrive granted confirms the connection.
+				final AtomicInteger pendingSubAcks =
+						new AtomicInteger((totalCount + maxTopicsPerSubscribe - 1) / maxTopicsPerSubscribe);
 
 				while (subscribedCount < totalCount) {
 					int topicsRemaining = totalCount - subscribedCount;
@@ -2753,6 +2848,9 @@ public class TahuClient implements MqttCallbackExtended {
 								if (Arrays.equals(qosLevels, grantedQos)) {
 									logger.debug("{}: server {} - Successfully subscribed on {} on QoS={}",
 											getClientId(), getMqttServerName(), topicStr, qosStr);
+									if (pendingSubAcks.decrementAndGet() == 0) {
+										onSubscriptionsConfirmed(generation);
+									}
 								} else {
 									try {
 										String grantedQosStr = Arrays.toString(grantedQos);
@@ -2807,8 +2905,18 @@ public class TahuClient implements MqttCallbackExtended {
 
 						});
 					} catch (MqttException e) {
-						logger.error("{}: server {} - Failed to subscribe on {} with QoS={}", getClientId(),
-								getMqttServerName(), topicStr, qosStr, e);
+						/*
+						 * The remaining batches are never sent, so their SUBACKs never arrive and the BIRTH would be
+						 * withheld for the life of the connection. Cycle it instead, as a denied subscription does.
+						 */
+						logger.error("{}: server {} - Failed to subscribe on {} with QoS={} - forcing disconnect",
+								getClientId(), getMqttServerName(), topicStr, qosStr, e);
+						try {
+							client.disconnectForcibly(0, 1, false);
+						} catch (MqttException de) {
+							logger.error("{}: server {} - Failed disconnect on failed subscribe", getClientId(),
+									getMqttServerName(), de);
+						}
 						break;
 					}
 
@@ -2819,12 +2927,23 @@ public class TahuClient implements MqttCallbackExtended {
 				if (trackFirstConnection && !firstConnection) {
 					logger.warn("{}: No subscriptions for {}", getClientId(), getClientId());
 				}
+
+				// Nothing to wait for
+				subscriptionsConfirmedGeneration = generation;
+				confirmedOnConnect = true;
+			}
+
+			if (subscriptionsConfirmedGeneration != generation && client != null && client.isConnected()) {
+				startSubAckWatchdog(generation, client);
 			}
 
 			// Mark that the client has finished re-subscribing
 			resubscribed = true;
 
-			// Publish a standard Birth/Death Certificate if a baseTopic has been defined.
+			/*
+			 * Publish a standard Birth/Death Certificate if a baseTopic has been defined. With subscriptions still
+			 * awaiting their SUBACKs the BIRTH is withheld here and published by onSubscriptionsConfirmed() instead.
+			 */
 			if (onlineState) {
 				publishBirthMessage();
 			} else {
@@ -2853,6 +2972,53 @@ public class TahuClient implements MqttCallbackExtended {
 			}
 
 			firstConnection = false;
+		}
+
+		if (confirmedOnConnect) {
+			notifySubscriptionsConfirmed();
+		}
+	}
+
+	/**
+	 * Marks the given connection's subscriptions as confirmed and publishes the BIRTH that connectComplete() withheld.
+	 *
+	 * Runs on Paho's callback thread, from the action listener of the last SUBACK to arrive.
+	 *
+	 * @param generation the connection the SUBACKs were for
+	 */
+	private void onSubscriptionsConfirmed(long generation) {
+		// Same reasoning as publishBirthMessage(): do not park the callback thread behind a teardown
+		if (isDisconnectInProgress()) {
+			logger.debug("{}: Not confirming the subscriptions - a disconnect is in progress", getClientId());
+			return;
+		}
+
+		synchronized (clientLock) {
+			if (generation != connectGeneration) {
+				logger.debug("{}: Ignoring SUBACKs for an earlier connection", getClientId());
+				return;
+			}
+
+			logger.debug("{}: server {} - All subscriptions confirmed", getClientId(), getMqttServerName());
+			subscriptionsConfirmedGeneration = generation;
+
+			if (onlineState) {
+				publishBirthMessage();
+			}
+		}
+
+		notifySubscriptionsConfirmed();
+	}
+
+	/*
+	 * Outside clientLock, like the other application callbacks: what the application does on hearing it is its own
+	 * business, and must not be able to stall this client's lock.
+	 */
+	private void notifySubscriptionsConfirmed() {
+		try {
+			getCallback().subscriptionsConfirmed(getMqttServerName(), getMqttServerUrl(), getClientId());
+		} catch (Exception e) {
+			logger.error("{}: The subscriptionsConfirmed callback failed", getClientId(), e);
 		}
 	}
 
@@ -2936,6 +3102,17 @@ public class TahuClient implements MqttCallbackExtended {
 			 * would otherwise dereference null here. publishLwt() guards the same way.
 			 */
 			if (birthTopic == null || client == null || !client.isConnected()) {
+				return;
+			}
+
+			/*
+			 * Every route into the BIRTH passes here - connectComplete(), setOnlineState() and the STATE correction in
+			 * TahuHostCallback - so this is the one place the subscription gate is enforced. Withheld, not dropped:
+			 * the SUBACK that completes the confirmation calls back in here.
+			 */
+			if (!isSubscriptionsConfirmed()) {
+				logger.debug("{}: Not publishing the BIRTH yet - the subscriptions have not all been confirmed",
+						getClientId());
 				return;
 			}
 
@@ -3024,6 +3201,98 @@ public class TahuClient implements MqttCallbackExtended {
 			birthRecoveryThread.setDaemon(true);
 			birthRecoveryThread.start();
 		}
+	}
+
+	/**
+	 * Cycles the live connection after the MQTT Server refused a subscription on it, if the application opted in with
+	 * {@link #setReconnectOnRefusedSubscription(boolean)}. Called from subscribe(), under {@link #clientLock}.
+	 *
+	 * The teardown runs on a worker for the same reasons as {@link BirthRecovery}: the Paho close must not run under
+	 * clientLock, and subscribe() can be reached from Paho's callback thread. It is scoped to the session the refusal
+	 * happened on, so a second refusal racing the first tears nothing else down.
+	 *
+	 * @param topic the topic whose subscription was refused
+	 */
+	private void onSubscriptionRefused(String topic) {
+		if (!reconnectOnRefusedSubscription) {
+			return;
+		}
+
+		logger.error("{}: server {} - The subscription on {} was refused - cycling the connection", getClientId(),
+				getMqttServerName(), topic);
+		cycleSession(client, "Subscription refused on " + topic, "TahuSubscriptionRefused-");
+	}
+
+	/**
+	 * Cycles the connection if its SUBACKs have not all arrived within {@link #getSubAckTimeout()}.
+	 *
+	 * One sleeping daemon thread per connection that has SUBACKs outstanding. It holds no lock while it waits, and
+	 * acts only if the connection it was started for is still the live one and still unconfirmed, so one outlived by a
+	 * reconnect, or by its own SUBACKs, does nothing.
+	 *
+	 * @param generation the connection the SUBACKs were requested on
+	 * @param session the session they were requested on
+	 */
+	private void startSubAckWatchdog(long generation, TahuMqttAsyncClient session) {
+		final long timeout = getSubAckTimeout();
+		Thread watchdog = new Thread(() -> {
+			try {
+				Thread.sleep(timeout);
+			} catch (InterruptedException e) {
+				Thread.currentThread().interrupt();
+				return;
+			}
+
+			synchronized (clientLock) {
+				if (connectGeneration != generation || subscriptionsConfirmedGeneration == generation
+						|| client != session || !session.isConnected()) {
+					return;
+				}
+				logger.error("{}: server {} - The SUBACKs did not all arrive within {}ms - cycling the connection",
+						getClientId(), getMqttServerName(), timeout);
+			}
+
+			cycleSession(session, "SUBACKs not received within " + timeout + "ms", "TahuSubAckTimeout-");
+		}, "TahuSubAckWatchdog-" + getClientId().getMqttClientId());
+		watchdog.setDaemon(true);
+		watchdog.start();
+	}
+
+	/**
+	 * Tears the given session down so the MQTT Server publishes its Will, then re-arms the reconnect.
+	 *
+	 * On a worker for the same reasons as {@link BirthRecovery}: the Paho close must not run under clientLock, and the
+	 * callers can be on Paho's callback thread. Scoped to the session, so a second cycle racing the first tears
+	 * nothing else down.
+	 *
+	 * @param session the session to tear down
+	 * @param reason why, for the connectionLost cause
+	 * @param threadPrefix the worker thread's name prefix
+	 */
+	private void cycleSession(TahuMqttAsyncClient session, String reason, String threadPrefix) {
+		Thread worker = new Thread(() -> {
+			/*
+			 * sendDisconnect false so the MQTT Server publishes the Will, and publishLwt false because a connection
+			 * whose subscriptions are not all in place should not be confirming anything on its way out - the Will is
+			 * the better carrier, as it is for a failed BIRTH.
+			 */
+			boolean tornDown;
+			try {
+				tornDown = disconnectSession(session, 0, 1, false, false, false);
+			} catch (Exception e) {
+				// As in BirthRecovery: the session was detached before anything that can throw ran
+				logger.error("{}: Failed to close the session - {}", getClientId(), reason, e);
+				tornDown = true;
+			}
+
+			// Re-arm the reconnect - a locally requested disconnect produces no connectionLost from Paho
+			if (tornDown) {
+				getCallback().connectionLost(getMqttServerName(), getMqttServerUrl(), getClientId(),
+						new Throwable(reason));
+			}
+		}, threadPrefix + getClientId().getMqttClientId());
+		worker.setDaemon(true);
+		worker.start();
 	}
 
 	private class BirthRecovery implements Runnable {

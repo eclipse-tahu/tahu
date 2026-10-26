@@ -30,4 +30,16 @@ public interface ClientCallback {
 
 	public void connectComplete(boolean reconnect, MqttServerName mqttServerName, MqttServerUrl mqttServerUrl,
 			MqttClientId clientId);
+
+	/**
+	 * Called once every subscription made on a new connection has been granted by the MQTT Server - the point at which
+	 * the client publishes its BIRTH. Called on Paho's callback thread, so an implementation must not block.
+	 *
+	 * @param mqttServerName the MQTT Server name
+	 * @param mqttServerUrl the MQTT Server URL
+	 * @param clientId the MQTT Client ID
+	 */
+	public default void subscriptionsConfirmed(MqttServerName mqttServerName, MqttServerUrl mqttServerUrl,
+			MqttClientId clientId) {
+	}
 }
