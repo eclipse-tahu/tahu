@@ -1594,6 +1594,8 @@ public class TahuClient implements MqttCallbackExtended {
 							// A refused topic is kept only with the opt-in, as in subscribe(String[], int[])
 							if (!isRefused(grantedQos[0]) || reconnectOnRefusedSubscription) {
 								subscriptions.put(topic, qos);
+							} else {
+								subscriptions.remove(topic);
 							}
 							if (isRefused(grantedQos[0])) {
 								onSubscriptionRefused(topic);
@@ -1644,8 +1646,8 @@ public class TahuClient implements MqttCallbackExtended {
 							/*
 							 * Every granted topic is kept, whatever its position. A refused one is kept only when the
 							 * application opted in to cycling: re-subscribing it in connectComplete() is refused again
-							 * and forces a reconnect, so keeping it otherwise would reconnect forever. The connection
-							 * is cycled at most once.
+							 * and forces a reconnect, so keeping it otherwise would reconnect forever - including one
+							 * stored by an earlier grant. The connection is cycled at most once.
 							 */
 							String refused = null;
 							for (int i = 0; i < topics.length; i++) {
@@ -1654,6 +1656,8 @@ public class TahuClient implements MqttCallbackExtended {
 								} else {
 									if (reconnectOnRefusedSubscription) {
 										subscriptions.put(topics[i], qos[i]);
+									} else {
+										subscriptions.remove(topics[i]);
 									}
 									if (refused == null) {
 										refused = topics[i];

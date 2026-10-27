@@ -3403,6 +3403,29 @@ public class TahuClientPublishBufferTest {
 	@Test(
 			timeOut = TIMEOUT_MS)
 	@SuppressWarnings("unchecked")
+	public void aTopicGrantedEarlierThenRefusedWithoutTheOptInIsNoLongerKept() throws Exception {
+		wire(8, 8);
+		addSubscription("a/#", 0);
+		addSubscription("b/#", 0);
+		addSubscription("c/#", 0);
+
+		fakeClient.grantOnSyncSubscribe(new int[] { 0x80 });
+		tahuClient.subscribe("a/#", 0);
+		fakeClient.grantOnSyncSubscribe(new int[] { 0, 0x80 });
+		try {
+			tahuClient.subscribe(new String[] { "b/#", "c/#" }, new int[] { 0, 0 });
+			Assert.fail("A refusal must still be reported to the caller");
+		} catch (TahuException e) {
+			// Expected
+		}
+
+		Assert.assertEquals(((Map<String, Integer>) get(tahuClient, "subscriptions")).keySet(), Set.of("b/#"),
+				"A topic stored by an earlier grant must be dropped once it is refused");
+	}
+
+	@Test(
+			timeOut = TIMEOUT_MS)
+	@SuppressWarnings("unchecked")
 	public void aRefusedSingleTopicSubscribeWithoutTheOptInIsNotKept() throws Exception {
 		wire(8, 8);
 		fakeClient.grantOnSyncSubscribe(new int[] { 0x80 });
