@@ -23,6 +23,7 @@ import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -32,6 +33,7 @@ import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 
@@ -3215,6 +3217,169 @@ public class TahuClientPublishBufferTest {
 		Assert.assertEquals(tahuClient.getSubAckTimeout(), 1234L, "An explicit timeout must be used as given");
 	}
 
+	/** A timeout of 0 turns the SUBACK timeout off, and a negative one restores the default. */
+	@Test(
+			timeOut = TIMEOUT_MS)
+	public void aSubAckTimeoutOfZeroWaitsIndefinitely() throws Exception {
+		wireForConnectComplete();
+		tahuClient.setSubAckTimeout(0);
+		addSubscription("spBv1.0/#", 0);
+
+		try {
+			tahuClient.connectComplete(false, "tcp://localhost:1883");
+
+			Thread.sleep(800);
+			Assert.assertEquals(callback.connectionLostCount.get(), 0, "With no timeout nothing must be cycled");
+			Assert.assertNull(get(tahuClient, "subAckWatchdog"), "With no timeout nothing must be scheduled");
+
+			tahuClient.setSubAckTimeout(-1);
+			Assert.assertEquals(tahuClient.getSubAckTimeout(), 60000L, "A negative timeout must restore the default");
+		} finally {
+			stopConnectionMonitor();
+		}
+	}
+
+	/** The SUBACK timeout is cancelled once the SUBACKs are in, so a healthy connect leaves nothing scheduled. */
+	@Test(
+			timeOut = TIMEOUT_MS)
+	public void theSubAckTimeoutIsCancelledWhenTheSubAcksArrive() throws Exception {
+		wireForConnectComplete();
+		addSubscription("spBv1.0/#", 0);
+
+		try {
+			tahuClient.connectComplete(false, "tcp://localhost:1883");
+			Assert.assertNotNull(get(tahuClient, "subAckWatchdog"), "Precondition: the SUBACKs are being waited on");
+
+			fakeClient.subAck(0, new int[] { 0 });
+
+			Assert.assertNull(get(tahuClient, "subAckWatchdog"), "The confirmed connection's timeout must be cancelled");
+		} finally {
+			stopConnectionMonitor();
+		}
+	}
+
+	/**
+	 * A SUBACK that arrives after its connection timed out must not publish the BIRTH. The timeout writes the
+	 * connection off under clientLock before the teardown, so the late SUBACK finds nothing to confirm.
+	 */
+	@Test(
+			timeOut = TIMEOUT_MS)
+	public void aSubAckArrivingAfterTheTimeoutPublishesNoBirth() throws Exception {
+		wireForConnectComplete();
+		tahuClient.setSubAckTimeout(300);
+		addSubscription("spBv1.0/#", 0);
+
+		try {
+			tahuClient.connectComplete(false, "tcp://localhost:1883");
+			awaitTrue(() -> callback.connectionLostCount.get() == 1, "Precondition: the SUBACKs timed out");
+
+			fakeClient.subAck(0, new int[] { 0 });
+
+			Assert.assertEquals(fakeClient.publishedTopics(), List.of(),
+					"A SUBACK for a connection that timed out must not publish its BIRTH");
+			Assert.assertEquals(callback.subscriptionsConfirmedCount.get(), 0,
+					"A connection that timed out must not be reported as confirmed");
+		} finally {
+			stopConnectionMonitor();
+		}
+	}
+
+	/**
+	 * A lost connection is not confirmed, and neither is the next one until its own SUBACKs are in. Paho's automatic
+	 * reconnect reports connected before connectComplete() runs, and an ONLINE published in that window would go
+	 * out ahead of the re-subscribes.
+	 */
+	@Test(
+			timeOut = TIMEOUT_MS)
+	public void aLostConnectionIsNotConfirmedUntilItsSuccessorIsGranted() throws Exception {
+		wireForConnectComplete();
+		addSubscription("spBv1.0/#", 0);
+
+		try {
+			tahuClient.connectComplete(false, "tcp://localhost:1883");
+			fakeClient.subAck(0, new int[] { 0 });
+			Assert.assertTrue(tahuClient.isSubscriptionsConfirmed(), "Precondition: the connection is confirmed");
+
+			fakeClient.markDisconnected();
+			Assert.assertFalse(tahuClient.isSubscriptionsConfirmed(), "A disconnected client must not be confirmed");
+
+			// Without the client, as the TRACE dump in connectionLost() needs a real Paho session
+			set(tahuClient, "client", null);
+			tahuClient.connectionLost(new Throwable("test"));
+			set(tahuClient, "client", fakeClient);
+			fakeClient.markConnected();
+			Assert.assertFalse(tahuClient.isSubscriptionsConfirmed(),
+					"A reconnected client must not carry the lost connection's confirmation");
+
+			tahuClient.connectComplete(true, "tcp://localhost:1883");
+			Assert.assertFalse(tahuClient.isSubscriptionsConfirmed(), "The new connection's SUBACK is still to come");
+
+			fakeClient.subAck(1, new int[] { 0 });
+			Assert.assertTrue(tahuClient.isSubscriptionsConfirmed(), "The new connection's own SUBACK confirms it");
+		} finally {
+			stopConnectionMonitor();
+		}
+	}
+
+	/** MQTT allows the MQTT Server to grant a lower QoS than requested. That is a grant, not a refusal. */
+	@Test(
+			timeOut = TIMEOUT_MS)
+	public void aDowngradedQosConfirmsTheConnection() throws Exception {
+		wireForConnectComplete();
+		addSubscription("spBv1.0/#", 2);
+
+		try {
+			tahuClient.connectComplete(false, "tcp://localhost:1883");
+			fakeClient.subAck(0, new int[] { 1 });
+
+			Assert.assertFalse(fakeClient.disconnectForciblyCalled, "A downgraded QoS must not cycle the connection");
+			Assert.assertTrue(tahuClient.isSubscriptionsConfirmed(), "A downgraded QoS is still a grant");
+			Assert.assertEquals(fakeClient.publishedTopics(), List.of(BIRTH_TOPIC), "The BIRTH must be published");
+		} finally {
+			stopConnectionMonitor();
+		}
+	}
+
+	/** The same on a live connection: opted in, a downgraded QoS is returned to the caller and cycles nothing. */
+	@Test(
+			timeOut = TIMEOUT_MS)
+	public void aDowngradedQosOnALiveConnectionDoesNotCycleIt() throws Exception {
+		wire(8, 8);
+		tahuClient.setReconnectOnRefusedSubscription(true);
+		fakeClient.grantOnSyncSubscribe(new int[] { 1 });
+
+		Assert.assertEquals(tahuClient.subscribe("spBv1.0/G9/#", 2), 1, "The caller sees the QoS that was granted");
+		Thread.sleep(500);
+		Assert.assertEquals(callback.connectionLostCount.get(), 0, "A downgraded QoS must not cycle the connection");
+	}
+
+	/**
+	 * A refusal in a multi-topic subscribe keeps every topic, as the single-topic subscribe() keeps its one, so the
+	 * re-subscribe on the next connection includes them all. The connection is cycled once.
+	 */
+	@Test(
+			timeOut = TIMEOUT_MS)
+	@SuppressWarnings("unchecked")
+	public void aRefusalInAMultiTopicSubscribeKeepsEveryTopic() throws Exception {
+		wire(8, 8);
+		tahuClient.setReconnectOnRefusedSubscription(true);
+		fakeClient.grantOnSyncSubscribe(new int[] { 0, 0x80, 0, 0x80 });
+
+		try {
+			tahuClient.subscribe(new String[] { "a/#", "b/#", "c/#", "d/#" }, new int[] { 0, 0, 0, 0 });
+			Assert.fail("A refusal must still be reported to the caller");
+		} catch (TahuException e) {
+			// Expected
+		}
+
+		Assert.assertEquals(((Map<String, Integer>) get(tahuClient, "subscriptions")).keySet(),
+				Set.of("a/#", "b/#", "c/#", "d/#"), "Every topic must be kept for the next connection");
+		Assert.assertFalse(tahuClient.isSubscriptionsConfirmed(), "A refused connection must not be confirmed");
+		awaitTrue(() -> callback.connectionLostCount.get() == 1, "The refusal must cycle the connection");
+		Thread.sleep(300);
+		Assert.assertEquals(callback.connectionLostCount.get(), 1, "Two refusals must cycle the connection once");
+	}
+
 	/** A connected, online client with a BIRTH topic, for a test to drive connectComplete() on. */
 	private void wireForConnectComplete() throws Exception {
 		wire(8, 8);
@@ -3259,7 +3424,7 @@ public class TahuClientPublishBufferTest {
 		set(tahuClient, "maxInFlightMessages", maxInflight);
 
 		// A live session with no subscriptions outstanding, which is what connectComplete() leaves without any
-		set(tahuClient, "subscriptionsConfirmedGeneration", get(tahuClient, "connectGeneration"));
+		set(tahuClient, "subscriptionsConfirmedGeneration", ((AtomicLong) get(tahuClient, "connectGeneration")).get());
 		startDrain();
 	}
 
