@@ -22,6 +22,8 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -31,12 +33,14 @@ import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 
 import org.eclipse.paho.client.mqttv3.IMqttActionListener;
 import org.eclipse.paho.client.mqttv3.IMqttAsyncClient;
 import org.eclipse.paho.client.mqttv3.IMqttDeliveryToken;
+import org.eclipse.paho.client.mqttv3.IMqttToken;
 import org.eclipse.paho.client.mqttv3.MqttException;
 import org.eclipse.paho.client.mqttv3.MqttMessage;
 import org.eclipse.paho.client.mqttv3.internal.wire.MqttWireMessage;
@@ -2850,6 +2854,611 @@ public class TahuClientPublishBufferTest {
 	}
 
 	// ------------------------------------------------------------------------------------------------------------
+	// The BIRTH is withheld until the subscriptions are granted - IMM-5498
+	// ------------------------------------------------------------------------------------------------------------
+
+	/**
+	 * The ONLINE STATE must not go out before the MQTT Server has granted the subscriptions it announces.
+	 *
+	 * Transmission flushes its store and forward history on a Host Application's ONLINE STATE. Published ahead of the
+	 * SUBACKs, it announced a session that a denied subscription then forcibly disconnected, and the history flushed
+	 * into that window was lost.
+	 */
+	@Test(
+			timeOut = TIMEOUT_MS)
+	public void theBirthIsWithheldUntilTheSubscriptionsAreGranted() throws Exception {
+		wireForConnectComplete();
+		addSubscription("spBv1.0/#", 0);
+
+		try {
+			tahuClient.connectComplete(false, "tcp://localhost:1883");
+
+			Assert.assertEquals(fakeClient.publishedTopics(), List.of(),
+					"The BIRTH must not be published before the SUBACK has arrived");
+			Assert.assertFalse(tahuClient.isSubscriptionsConfirmed(), "Nothing has been granted yet");
+
+			fakeClient.subAck(0, new int[] { 0 });
+
+			Assert.assertTrue(tahuClient.isSubscriptionsConfirmed(), "The only SUBACK granted everything asked for");
+			Assert.assertEquals(fakeClient.publishedTopics(), List.of(BIRTH_TOPIC),
+					"The SUBACK that confirms the subscriptions must publish the withheld BIRTH");
+		} finally {
+			stopConnectionMonitor();
+		}
+	}
+
+	/** A denied subscription cycles the connection, and the session it ends must never have announced itself. */
+	@Test(
+			timeOut = TIMEOUT_MS)
+	public void theBirthIsNeverPublishedWhenASubscriptionIsDenied() throws Exception {
+		wireForConnectComplete();
+		addSubscription("spBv1.0/#", 0);
+
+		try {
+			tahuClient.connectComplete(false, "tcp://localhost:1883");
+
+			// 0x80 - the SUBACK return code for a subscription the MQTT Server refused
+			fakeClient.subAck(0, new int[] { 0x80 });
+
+			Assert.assertTrue(fakeClient.disconnectForciblyCalled, "A denied subscription must cycle the connection");
+			Assert.assertFalse(tahuClient.isSubscriptionsConfirmed(), "A denied subscription confirms nothing");
+			Assert.assertEquals(fakeClient.publishedTopics(), List.of(),
+					"The BIRTH must not be published for a connection whose subscriptions were denied");
+		} finally {
+			stopConnectionMonitor();
+		}
+	}
+
+	/** Split across several SUBSCRIBE packets, it is the last SUBACK to arrive that confirms the connection. */
+	@Test(
+			timeOut = TIMEOUT_MS)
+	public void theBirthWaitsForEverySubAckWhenTheSubscriptionsAreBatched() throws Exception {
+		wireForConnectComplete();
+		tahuClient.setMaxTopicsPerSubscribe(1);
+		addSubscription("spBv1.0/G1/#", 0);
+		addSubscription("spBv1.0/G2/#", 0);
+
+		try {
+			tahuClient.connectComplete(false, "tcp://localhost:1883");
+			Assert.assertEquals(fakeClient.subscribeListenerCount(), 2, "Precondition: one SUBSCRIBE per topic");
+
+			fakeClient.subAck(1, new int[] { 0 });
+			Assert.assertEquals(fakeClient.publishedTopics(), List.of(),
+					"One SUBACK of two confirms nothing - the other subscription may still be denied");
+
+			fakeClient.subAck(0, new int[] { 0 });
+			Assert.assertEquals(fakeClient.publishedTopics(), List.of(BIRTH_TOPIC),
+					"The last SUBACK to arrive must publish the BIRTH");
+		} finally {
+			stopConnectionMonitor();
+		}
+	}
+
+	/**
+	 * A SUBACK from an earlier connection must not confirm the current one.
+	 *
+	 * Paho's automatic reconnect reuses the same client object, so the SUBACK cannot be told apart by the client it
+	 * arrived on - only by the connection it was requested for.
+	 */
+	@Test(
+			timeOut = TIMEOUT_MS)
+	public void aSubAckFromAnEarlierConnectionDoesNotPublishTheBirth() throws Exception {
+		wireForConnectComplete();
+		addSubscription("spBv1.0/#", 0);
+
+		try {
+			tahuClient.connectComplete(false, "tcp://localhost:1883");
+			tahuClient.connectComplete(true, "tcp://localhost:1883");
+
+			fakeClient.subAck(0, new int[] { 0 });
+			Assert.assertFalse(tahuClient.isSubscriptionsConfirmed(),
+					"The SUBACK for the first connection must not confirm the second");
+			Assert.assertEquals(fakeClient.publishedTopics(), List.of(),
+					"The BIRTH must not be published on the strength of an earlier connection's SUBACK");
+
+			fakeClient.subAck(1, new int[] { 0 });
+			Assert.assertEquals(fakeClient.publishedTopics(), List.of(BIRTH_TOPIC),
+					"The current connection's own SUBACK must publish the BIRTH");
+		} finally {
+			stopConnectionMonitor();
+		}
+	}
+
+	/** Going online mid-connection must wait for the subscriptions too, not just the BIRTH connectComplete() sends. */
+	@Test(
+			timeOut = TIMEOUT_MS)
+	public void setOnlineStateWithholdsTheBirthUntilTheSubscriptionsAreGranted() throws Exception {
+		wireForConnectComplete();
+		set(tahuClient, "onlineState", false);
+		addSubscription("spBv1.0/#", 0);
+
+		try {
+			tahuClient.connectComplete(false, "tcp://localhost:1883");
+
+			tahuClient.setOnlineState(true);
+			Assert.assertEquals(fakeClient.publishedTopics(), List.of(),
+					"setOnlineState() must not publish the BIRTH before the SUBACK has arrived");
+
+			fakeClient.subAck(0, new int[] { 0 });
+			Assert.assertEquals(fakeClient.publishedTopics(), List.of(BIRTH_TOPIC),
+					"The withheld BIRTH must be published once the subscriptions are confirmed");
+		} finally {
+			stopConnectionMonitor();
+		}
+	}
+
+	/** With nothing to subscribe to there is nothing to wait for, and the BIRTH goes out on connect as before. */
+	@Test(
+			timeOut = TIMEOUT_MS)
+	public void theBirthIsPublishedOnConnectWhenThereAreNoSubscriptions() throws Exception {
+		wireForConnectComplete();
+
+		try {
+			tahuClient.connectComplete(false, "tcp://localhost:1883");
+
+			Assert.assertTrue(tahuClient.isSubscriptionsConfirmed(), "No subscriptions means nothing to confirm");
+			Assert.assertEquals(fakeClient.publishedTopics(), List.of(BIRTH_TOPIC),
+					"The BIRTH must be published on connect when there are no subscriptions");
+		} finally {
+			stopConnectionMonitor();
+		}
+	}
+
+	/**
+	 * A SUBSCRIBE that cannot be sent leaves its SUBACK unarrivable, so the BIRTH would be withheld for the life of the
+	 * connection. The connection must cycle instead, as it does for a refused subscription.
+	 */
+	@Test(
+			timeOut = TIMEOUT_MS)
+	public void aSubscribeThatCannotBeSentCyclesTheConnectionWithoutABirth() throws Exception {
+		wireForConnectComplete();
+		tahuClient.setMaxTopicsPerSubscribe(1);
+		addSubscription("spBv1.0/G1/#", 0);
+		addSubscription("spBv1.0/G2/#", 0);
+		fakeClient.failSubscribeRequest(1);
+
+		try {
+			tahuClient.connectComplete(false, "tcp://localhost:1883");
+
+			Assert.assertTrue(fakeClient.disconnectForciblyCalled,
+					"A SUBSCRIBE that could not be sent must cycle the connection");
+
+			fakeClient.subAck(0, new int[] { 0 });
+			Assert.assertFalse(tahuClient.isSubscriptionsConfirmed(),
+					"The SUBACK for the batch that was sent must not confirm a connection missing the other");
+			Assert.assertEquals(fakeClient.publishedTopics(), List.of(),
+					"The BIRTH must not be published for a connection that could not make all its subscriptions");
+		} finally {
+			stopConnectionMonitor();
+		}
+	}
+
+	/** A SUBSCRIBE that fails outright cycles the connection, and its session must never have announced itself. */
+	@Test(
+			timeOut = TIMEOUT_MS)
+	public void theBirthIsNeverPublishedWhenASubscribeFails() throws Exception {
+		wireForConnectComplete();
+		addSubscription("spBv1.0/#", 0);
+
+		try {
+			tahuClient.connectComplete(false, "tcp://localhost:1883");
+
+			fakeClient.subFail(0);
+
+			Assert.assertTrue(fakeClient.disconnectForciblyCalled, "A failed SUBSCRIBE must cycle the connection");
+			Assert.assertFalse(tahuClient.isSubscriptionsConfirmed(), "A failed SUBSCRIBE confirms nothing");
+			Assert.assertEquals(fakeClient.publishedTopics(), List.of(),
+					"The BIRTH must not be published for a connection whose SUBSCRIBE failed");
+			Assert.assertEquals(callback.subscriptionsConfirmedCount.get(), 0,
+					"The application must not hear that the subscriptions were confirmed");
+		} finally {
+			stopConnectionMonitor();
+		}
+	}
+
+	/** Going offline while the SUBACKs are outstanding must stop the confirming SUBACK from publishing the BIRTH. */
+	@Test(
+			timeOut = TIMEOUT_MS)
+	public void theConfirmingSubAckDoesNotPublishTheBirthOnceTheClientHasGoneOffline() throws Exception {
+		wireForConnectComplete();
+		addSubscription("spBv1.0/#", 0);
+
+		try {
+			tahuClient.connectComplete(false, "tcp://localhost:1883");
+
+			set(tahuClient, "onlineState", false);
+			fakeClient.subAck(0, new int[] { 0 });
+
+			Assert.assertTrue(tahuClient.isSubscriptionsConfirmed(), "The subscriptions are confirmed regardless");
+			Assert.assertFalse(fakeClient.publishedTopics().contains(BIRTH_TOPIC),
+					"A client that went offline before its SUBACK arrived must not publish the BIRTH on it");
+		} finally {
+			stopConnectionMonitor();
+		}
+	}
+
+	/** The application hears once per connection, on the SUBACK that confirms it - and not for a stale one. */
+	@Test(
+			timeOut = TIMEOUT_MS)
+	public void theApplicationIsToldOnceTheSubscriptionsAreConfirmed() throws Exception {
+		wireForConnectComplete();
+		addSubscription("spBv1.0/#", 0);
+
+		try {
+			tahuClient.connectComplete(false, "tcp://localhost:1883");
+			tahuClient.connectComplete(true, "tcp://localhost:1883");
+
+			fakeClient.subAck(0, new int[] { 0 });
+			Assert.assertEquals(callback.subscriptionsConfirmedCount.get(), 0,
+					"A SUBACK for an earlier connection must not be reported as confirming the current one");
+
+			fakeClient.subAck(1, new int[] { 0 });
+			Assert.assertEquals(callback.subscriptionsConfirmedCount.get(), 1,
+					"The confirming SUBACK must be reported to the application exactly once");
+		} finally {
+			stopConnectionMonitor();
+		}
+	}
+
+	/** With nothing to subscribe to, the connection is confirmed on connect and the application is told so. */
+	@Test(
+			timeOut = TIMEOUT_MS)
+	public void theApplicationIsToldOnConnectWhenThereAreNoSubscriptions() throws Exception {
+		wireForConnectComplete();
+
+		try {
+			tahuClient.connectComplete(false, "tcp://localhost:1883");
+
+			Assert.assertEquals(callback.subscriptionsConfirmedCount.get(), 1,
+					"A connection with nothing to subscribe to is confirmed on connect");
+		} finally {
+			stopConnectionMonitor();
+		}
+	}
+
+	/**
+	 * With the opt-in, a subscription refused on a live connection cycles it, the way one refused in connectComplete()
+	 * does - rather than leaving the client announced ONLINE without it.
+	 */
+	@Test(
+			timeOut = TIMEOUT_MS)
+	public void aRefusedSubscriptionOnALiveConnectionCyclesItWhenOptedIn() throws Exception {
+		wire(8, 8);
+		tahuClient.setReconnectOnRefusedSubscription(true);
+		fakeClient.grantOnSyncSubscribe(new int[] { 0x80 });
+
+		int granted = tahuClient.subscribe("spBv1.0/G9/#", 0);
+
+		Assert.assertEquals(granted, 0x80, "The caller still sees what the MQTT Server granted");
+		awaitTrue(() -> callback.connectionLostCount.get() == 1,
+				"A refused subscription must tear the session down and re-arm the reconnect");
+		Assert.assertNull(get(tahuClient, "client"), "The session the refusal happened on must be torn down");
+	}
+
+	/** Without the opt-in, subscribe() only reports the refusal - every other client keeps the old behaviour. */
+	@Test(
+			timeOut = TIMEOUT_MS)
+	public void aRefusedSubscriptionDoesNotCycleTheConnectionByDefault() throws Exception {
+		wire(8, 8);
+		fakeClient.grantOnSyncSubscribe(new int[] { 0x80 });
+
+		int granted = tahuClient.subscribe("spBv1.0/G9/#", 0);
+
+		Assert.assertEquals(granted, 0x80, "The caller sees what the MQTT Server granted");
+		Thread.sleep(500);
+		Assert.assertEquals(callback.connectionLostCount.get(), 0, "Nothing must be torn down without the opt-in");
+		Assert.assertSame(get(tahuClient, "client"), fakeClient, "The session must be left as it was");
+	}
+
+	/** A granted subscription is not a refusal, opted in or not. */
+	@Test(
+			timeOut = TIMEOUT_MS)
+	public void aGrantedSubscriptionDoesNotCycleTheConnection() throws Exception {
+		wire(8, 8);
+		tahuClient.setReconnectOnRefusedSubscription(true);
+
+		Assert.assertEquals(tahuClient.subscribe("spBv1.0/G9/#", 1), 1, "Precondition: the subscription is granted");
+		Thread.sleep(500);
+		Assert.assertEquals(callback.connectionLostCount.get(), 0, "A granted subscription must not cycle anything");
+	}
+
+	/**
+	 * A SUBACK that never arrives would leave the BIRTH withheld for the life of the connection - connected, never
+	 * ONLINE and never retried. The connection must be cycled once the SUBACKs are overdue.
+	 */
+	@Test(
+			timeOut = TIMEOUT_MS)
+	public void aSubAckThatNeverArrivesCyclesTheConnection() throws Exception {
+		wireForConnectComplete();
+		tahuClient.setSubAckTimeout(300);
+		addSubscription("spBv1.0/#", 0);
+
+		try {
+			tahuClient.connectComplete(false, "tcp://localhost:1883");
+
+			awaitTrue(() -> callback.connectionLostCount.get() == 1,
+					"Overdue SUBACKs must tear the session down and re-arm the reconnect");
+			Assert.assertNull(get(tahuClient, "client"), "The session whose SUBACKs never came must be torn down");
+			Assert.assertEquals(fakeClient.publishedTopics(), List.of(),
+					"The BIRTH must not be published for a connection whose SUBACKs never came");
+		} finally {
+			stopConnectionMonitor();
+		}
+	}
+
+	/** SUBACKs that arrive within the timeout leave the connection alone. */
+	@Test(
+			timeOut = TIMEOUT_MS)
+	public void subAcksThatArriveInTimeDoNotCycleTheConnection() throws Exception {
+		wireForConnectComplete();
+		tahuClient.setSubAckTimeout(300);
+		addSubscription("spBv1.0/#", 0);
+
+		try {
+			tahuClient.connectComplete(false, "tcp://localhost:1883");
+			fakeClient.subAck(0, new int[] { 0 });
+
+			Thread.sleep(800);
+			Assert.assertEquals(callback.connectionLostCount.get(), 0,
+					"A connection confirmed in time must not be cycled when the timeout passes");
+			Assert.assertSame(get(tahuClient, "client"), fakeClient, "The session must be left as it was");
+			Assert.assertEquals(fakeClient.publishedTopics(), List.of(BIRTH_TOPIC), "The BIRTH must be published");
+		} finally {
+			stopConnectionMonitor();
+		}
+	}
+
+	/** Twice the keepAlive by default, so a healthy but slow MQTT Server is not cycled; overridable. */
+	@Test
+	public void theSubAckTimeoutDefaultsToTwiceTheKeepAlive() throws Exception {
+		Assert.assertEquals(tahuClient.getSubAckTimeout(), 60000L, "keepAlive 30s -> 60s by default");
+
+		tahuClient.setSubAckTimeout(1234);
+		Assert.assertEquals(tahuClient.getSubAckTimeout(), 1234L, "An explicit timeout must be used as given");
+	}
+
+	/** A timeout of 0 turns the SUBACK timeout off, and a negative one restores the default. */
+	@Test(
+			timeOut = TIMEOUT_MS)
+	public void aSubAckTimeoutOfZeroWaitsIndefinitely() throws Exception {
+		wireForConnectComplete();
+		tahuClient.setSubAckTimeout(0);
+		addSubscription("spBv1.0/#", 0);
+
+		try {
+			tahuClient.connectComplete(false, "tcp://localhost:1883");
+
+			Thread.sleep(800);
+			Assert.assertEquals(callback.connectionLostCount.get(), 0, "With no timeout nothing must be cycled");
+			Assert.assertNull(get(tahuClient, "subAckWatchdog"), "With no timeout nothing must be scheduled");
+
+			tahuClient.setSubAckTimeout(-1);
+			Assert.assertEquals(tahuClient.getSubAckTimeout(), 60000L, "A negative timeout must restore the default");
+		} finally {
+			stopConnectionMonitor();
+		}
+	}
+
+	/** The SUBACK timeout is cancelled once the SUBACKs are in, so a healthy connect leaves nothing scheduled. */
+	@Test(
+			timeOut = TIMEOUT_MS)
+	public void theSubAckTimeoutIsCancelledWhenTheSubAcksArrive() throws Exception {
+		wireForConnectComplete();
+		addSubscription("spBv1.0/#", 0);
+
+		try {
+			tahuClient.connectComplete(false, "tcp://localhost:1883");
+			Assert.assertNotNull(get(tahuClient, "subAckWatchdog"), "Precondition: the SUBACKs are being waited on");
+
+			fakeClient.subAck(0, new int[] { 0 });
+
+			Assert.assertNull(get(tahuClient, "subAckWatchdog"), "The confirmed connection's timeout must be cancelled");
+		} finally {
+			stopConnectionMonitor();
+		}
+	}
+
+	/**
+	 * A SUBACK that arrives after its connection timed out must not publish the BIRTH. The timeout writes the
+	 * connection off under clientLock before the teardown, so the late SUBACK finds nothing to confirm.
+	 */
+	@Test(
+			timeOut = TIMEOUT_MS)
+	public void aSubAckArrivingAfterTheTimeoutPublishesNoBirth() throws Exception {
+		wireForConnectComplete();
+		tahuClient.setSubAckTimeout(300);
+		addSubscription("spBv1.0/#", 0);
+
+		try {
+			tahuClient.connectComplete(false, "tcp://localhost:1883");
+			awaitTrue(() -> callback.connectionLostCount.get() == 1, "Precondition: the SUBACKs timed out");
+
+			fakeClient.subAck(0, new int[] { 0 });
+
+			Assert.assertEquals(fakeClient.publishedTopics(), List.of(),
+					"A SUBACK for a connection that timed out must not publish its BIRTH");
+			Assert.assertEquals(callback.subscriptionsConfirmedCount.get(), 0,
+					"A connection that timed out must not be reported as confirmed");
+		} finally {
+			stopConnectionMonitor();
+		}
+	}
+
+	/**
+	 * A lost connection is not confirmed, and neither is the next one until its own SUBACKs are in. Paho's automatic
+	 * reconnect reports connected before connectComplete() runs, and an ONLINE published in that window would go
+	 * out ahead of the re-subscribes.
+	 */
+	@Test(
+			timeOut = TIMEOUT_MS)
+	public void aLostConnectionIsNotConfirmedUntilItsSuccessorIsGranted() throws Exception {
+		wireForConnectComplete();
+		addSubscription("spBv1.0/#", 0);
+
+		try {
+			tahuClient.connectComplete(false, "tcp://localhost:1883");
+			fakeClient.subAck(0, new int[] { 0 });
+			Assert.assertTrue(tahuClient.isSubscriptionsConfirmed(), "Precondition: the connection is confirmed");
+
+			fakeClient.markDisconnected();
+			Assert.assertFalse(tahuClient.isSubscriptionsConfirmed(), "A disconnected client must not be confirmed");
+
+			// Without the client, as the TRACE dump in connectionLost() needs a real Paho session
+			set(tahuClient, "client", null);
+			tahuClient.connectionLost(new Throwable("test"));
+			set(tahuClient, "client", fakeClient);
+			fakeClient.markConnected();
+			Assert.assertFalse(tahuClient.isSubscriptionsConfirmed(),
+					"A reconnected client must not carry the lost connection's confirmation");
+
+			tahuClient.connectComplete(true, "tcp://localhost:1883");
+			Assert.assertFalse(tahuClient.isSubscriptionsConfirmed(), "The new connection's SUBACK is still to come");
+
+			fakeClient.subAck(1, new int[] { 0 });
+			Assert.assertTrue(tahuClient.isSubscriptionsConfirmed(), "The new connection's own SUBACK confirms it");
+		} finally {
+			stopConnectionMonitor();
+		}
+	}
+
+	/** MQTT allows the MQTT Server to grant a lower QoS than requested. That is a grant, not a refusal. */
+	@Test(
+			timeOut = TIMEOUT_MS)
+	public void aDowngradedQosConfirmsTheConnection() throws Exception {
+		wireForConnectComplete();
+		addSubscription("spBv1.0/#", 2);
+
+		try {
+			tahuClient.connectComplete(false, "tcp://localhost:1883");
+			fakeClient.subAck(0, new int[] { 1 });
+
+			Assert.assertFalse(fakeClient.disconnectForciblyCalled, "A downgraded QoS must not cycle the connection");
+			Assert.assertTrue(tahuClient.isSubscriptionsConfirmed(), "A downgraded QoS is still a grant");
+			Assert.assertEquals(fakeClient.publishedTopics(), List.of(BIRTH_TOPIC), "The BIRTH must be published");
+		} finally {
+			stopConnectionMonitor();
+		}
+	}
+
+	/** The same on a live connection: opted in, a downgraded QoS is returned to the caller and cycles nothing. */
+	@Test(
+			timeOut = TIMEOUT_MS)
+	public void aDowngradedQosOnALiveConnectionDoesNotCycleIt() throws Exception {
+		wire(8, 8);
+		tahuClient.setReconnectOnRefusedSubscription(true);
+		fakeClient.grantOnSyncSubscribe(new int[] { 1 });
+
+		Assert.assertEquals(tahuClient.subscribe("spBv1.0/G9/#", 2), 1, "The caller sees the QoS that was granted");
+		Thread.sleep(500);
+		Assert.assertEquals(callback.connectionLostCount.get(), 0, "A downgraded QoS must not cycle the connection");
+	}
+
+	/**
+	 * A refusal in a multi-topic subscribe keeps every topic, as the single-topic subscribe() keeps its one, so the
+	 * re-subscribe on the next connection includes them all. The connection is cycled once.
+	 */
+	@Test(
+			timeOut = TIMEOUT_MS)
+	@SuppressWarnings("unchecked")
+	public void aRefusalInAMultiTopicSubscribeKeepsEveryTopic() throws Exception {
+		wire(8, 8);
+		tahuClient.setReconnectOnRefusedSubscription(true);
+		fakeClient.grantOnSyncSubscribe(new int[] { 0, 0x80, 0, 0x80 });
+
+		try {
+			tahuClient.subscribe(new String[] { "a/#", "b/#", "c/#", "d/#" }, new int[] { 0, 0, 0, 0 });
+			Assert.fail("A refusal must still be reported to the caller");
+		} catch (TahuException e) {
+			// Expected
+		}
+
+		Assert.assertEquals(((Map<String, Integer>) get(tahuClient, "subscriptions")).keySet(),
+				Set.of("a/#", "b/#", "c/#", "d/#"), "Every topic must be kept for the next connection");
+		Assert.assertFalse(tahuClient.isSubscriptionsConfirmed(), "A refused connection must not be confirmed");
+		awaitTrue(() -> callback.connectionLostCount.get() == 1, "The refusal must cycle the connection");
+		Thread.sleep(300);
+		Assert.assertEquals(callback.connectionLostCount.get(), 1, "Two refusals must cycle the connection once");
+	}
+
+	@Test(
+			timeOut = TIMEOUT_MS)
+	@SuppressWarnings("unchecked")
+	public void aRefusalInAMultiTopicSubscribeWithoutTheOptInKeepsOnlyTheGrantedTopics() throws Exception {
+		wire(8, 8);
+		fakeClient.grantOnSyncSubscribe(new int[] { 0, 0x80, 1, 0x80 });
+
+		try {
+			tahuClient.subscribe(new String[] { "a/#", "b/#", "c/#", "d/#" }, new int[] { 0, 0, 2, 0 });
+			Assert.fail("A refusal must still be reported to the caller");
+		} catch (TahuException e) {
+			// Expected
+		}
+
+		Assert.assertEquals(((Map<String, Integer>) get(tahuClient, "subscriptions")).keySet(), Set.of("a/#", "c/#"),
+				"A refused topic must not be kept, or every reconnect would be refused and forced closed");
+		Thread.sleep(300);
+		Assert.assertEquals(callback.connectionLostCount.get(), 0, "Without the opt-in a refusal must not cycle");
+	}
+
+	@Test(
+			timeOut = TIMEOUT_MS)
+	@SuppressWarnings("unchecked")
+	public void aTopicGrantedEarlierThenRefusedWithoutTheOptInIsNoLongerKept() throws Exception {
+		wire(8, 8);
+		addSubscription("a/#", 0);
+		addSubscription("b/#", 0);
+		addSubscription("c/#", 0);
+
+		fakeClient.grantOnSyncSubscribe(new int[] { 0x80 });
+		tahuClient.subscribe("a/#", 0);
+		fakeClient.grantOnSyncSubscribe(new int[] { 0, 0x80 });
+		try {
+			tahuClient.subscribe(new String[] { "b/#", "c/#" }, new int[] { 0, 0 });
+			Assert.fail("A refusal must still be reported to the caller");
+		} catch (TahuException e) {
+			// Expected
+		}
+
+		Assert.assertEquals(((Map<String, Integer>) get(tahuClient, "subscriptions")).keySet(), Set.of("b/#"),
+				"A topic stored by an earlier grant must be dropped once it is refused");
+	}
+
+	@Test(
+			timeOut = TIMEOUT_MS)
+	@SuppressWarnings("unchecked")
+	public void aRefusedSingleTopicSubscribeWithoutTheOptInIsNotKept() throws Exception {
+		wire(8, 8);
+		fakeClient.grantOnSyncSubscribe(new int[] { 0x80 });
+
+		Assert.assertEquals(tahuClient.subscribe("a/#", 0), 0x80, "The refusal must be returned to the caller");
+
+		Assert.assertFalse(((Map<String, Integer>) get(tahuClient, "subscriptions")).containsKey("a/#"),
+				"A refused topic must not be kept, or every reconnect would be refused and forced closed");
+		Thread.sleep(300);
+		Assert.assertEquals(callback.connectionLostCount.get(), 0, "Without the opt-in a refusal must not cycle");
+	}
+
+	/** A connected, online client with a BIRTH topic, for a test to drive connectComplete() on. */
+	private void wireForConnectComplete() throws Exception {
+		wire(8, 8);
+		configureBirth();
+		set(tahuClient, "onlineState", true);
+	}
+
+	/** Records a subscription the way subscribe() does on a client that is not yet connected. */
+	@SuppressWarnings("unchecked")
+	private void addSubscription(String topic, int qos) throws Exception {
+		((Map<String, Integer>) get(tahuClient, "subscriptions")).put(topic, qos);
+	}
+
+	private void stopConnectionMonitor() throws Exception {
+		Object monitorThread = get(tahuClient, "connectionMonitorThread");
+		if (monitorThread != null) {
+			((Thread) monitorThread).interrupt();
+		}
+	}
+
+	// ------------------------------------------------------------------------------------------------------------
 	// Harness
 	// ------------------------------------------------------------------------------------------------------------
 
@@ -2871,6 +3480,9 @@ public class TahuClientPublishBufferTest {
 		set(tahuClient, "semaphore", new Semaphore(availablePermits, true));
 		set(tahuClient, "lockedMessageSet", ConcurrentHashMap.newKeySet());
 		set(tahuClient, "maxInFlightMessages", maxInflight);
+
+		// A live session with no subscriptions outstanding, which is what connectComplete() leaves without any
+		set(tahuClient, "subscriptionsConfirmedGeneration", ((AtomicLong) get(tahuClient, "connectGeneration")).get());
 		startDrain();
 	}
 
@@ -3057,9 +3669,78 @@ public class TahuClientPublishBufferTest {
 		private volatile boolean disconnectForciblyCalled;
 		private volatile Runnable duringDisconnectForcibly;
 		private volatile boolean closeThrows;
+		private final List<IMqttActionListener> subscribeListeners = new ArrayList<>();
+		private volatile int failSubscribeRequestAt = -1;
+		private volatile int[] grantOnSyncSubscribe;
 
 		private FakeMqttClient() throws MqttException {
 			super("tcp://localhost:1883", "test-client", null);
+		}
+
+		/*
+		 * Recorded rather than answered, so a test decides when each SUBACK arrives and what it grants - the window
+		 * between the SUBSCRIBE and its SUBACK is the one the BIRTH must not be published in.
+		 */
+		@Override
+		public synchronized IMqttToken subscribe(String[] topicFilters, int[] qos, Object userContext,
+				IMqttActionListener callback) throws MqttException {
+			if (subscribeListeners.size() == failSubscribeRequestAt) {
+				// 32202 == REASON_CODE_MAX_INFLIGHT, which Paho throws before a SUBSCRIBE is ever sent
+				throw new MqttException(32202);
+			}
+			subscribeListeners.add(callback);
+			return new FakeDeliveryToken(nextMessageId.getAndIncrement());
+		}
+
+		/*
+		 * The synchronous subscribe() path: the SUBACK is answered at once with grantOnSyncSubscribe, or with exactly
+		 * what was asked for when that is unset.
+		 */
+		@Override
+		public IMqttToken subscribe(String topicFilter, int qos) {
+			return subscribe(new String[] { topicFilter }, new int[] { qos });
+		}
+
+		@Override
+		public IMqttToken subscribe(String[] topicFilters, int[] qos) {
+			FakeDeliveryToken token = new FakeDeliveryToken(nextMessageId.getAndIncrement());
+			int[] granted = grantOnSyncSubscribe;
+			token.grantedQos = granted != null ? granted : qos.clone();
+			token.markComplete();
+			return token;
+		}
+
+		/* Makes the index'th SUBSCRIBE sent from connectComplete() throw instead of being sent. */
+		private void failSubscribeRequest(int index) {
+			failSubscribeRequestAt = index;
+		}
+
+		private void grantOnSyncSubscribe(int[] grantedQos) {
+			grantOnSyncSubscribe = grantedQos;
+		}
+
+		/* Fails the index'th SUBSCRIBE outright, as Paho does when the SUBACK never comes because the connection went. */
+		private void subFail(int index) {
+			IMqttActionListener listener;
+			synchronized (this) {
+				listener = subscribeListeners.get(index);
+			}
+			listener.onFailure(new FakeDeliveryToken(nextMessageId.getAndIncrement()), new MqttException(32109));
+		}
+
+		private synchronized int subscribeListenerCount() {
+			return subscribeListeners.size();
+		}
+
+		/* Delivers the SUBACK for the index'th SUBSCRIBE, granting the given QoS levels (0x80 for a refusal). */
+		private void subAck(int index, int[] grantedQos) {
+			IMqttActionListener listener;
+			synchronized (this) {
+				listener = subscribeListeners.get(index);
+			}
+			FakeDeliveryToken token = new FakeDeliveryToken(nextMessageId.getAndIncrement());
+			token.grantedQos = grantedQos;
+			listener.onSuccess(token);
 		}
 
 		/**
@@ -3216,6 +3897,7 @@ public class TahuClientPublishBufferTest {
 
 		private final int messageId;
 		private volatile boolean complete;
+		private int[] grantedQos = new int[0];
 		private Object userContext;
 		private IMqttActionListener actionCallback;
 
@@ -3287,7 +3969,7 @@ public class TahuClientPublishBufferTest {
 
 		@Override
 		public int[] getGrantedQos() {
-			return new int[0];
+			return grantedQos;
 		}
 
 		@Override
@@ -3305,6 +3987,13 @@ public class TahuClientPublishBufferTest {
 	private static class RecordingCallback extends NoOpCallback {
 
 		private final AtomicInteger connectionLostCount = new AtomicInteger();
+		private final AtomicInteger subscriptionsConfirmedCount = new AtomicInteger();
+
+		@Override
+		public void subscriptionsConfirmed(MqttServerName mqttServerName, MqttServerUrl mqttServerUrl,
+				MqttClientId clientId) {
+			subscriptionsConfirmedCount.incrementAndGet();
+		}
 		private final AtomicReference<Throwable> lastCause = new AtomicReference<>();
 
 		@Override
