@@ -732,7 +732,8 @@ public class TahuClient implements MqttCallbackExtended {
 	 * A subscription refused while connectComplete() re-subscribes always cycles the connection, and the refused
 	 * subscription is kept, so it is retried - and refused - on every reconnect until the MQTT Server allows it. With
 	 * this set, one refused by {@link #subscribe(String, int)} or {@link #subscribe(String[], int[])} on a live
-	 * connection does the same, rather than leaving the client connected and announced ONLINE without it.
+	 * connection does the same, rather than leaving the client connected and announced ONLINE without it. Without it,
+	 * a topic refused on a live connection is not kept, so it is not retried - and refused - on every reconnect.
 	 *
 	 * @param reconnectOnRefusedSubscription true to cycle the connection on a refused subscription
 	 */
@@ -1587,10 +1588,13 @@ public class TahuClient implements MqttCallbackExtended {
 						logger.trace("{}: Waiting for subscription on {}", getClientId(), topic);
 						token.waitForCompletion();
 						logger.trace("{}: Done waiting for subscription on {}", getClientId(), topic);
-						subscriptions.put(topic, qos);
 						int[] grantedQos = token.getGrantedQos();
 						logger.debug("{}: Granted QoS for subcription on {}: {}", getClientId(), topic, grantedQos[0]);
 						if (grantedQos != null && grantedQos.length == 1) {
+							// A refused topic is kept only with the opt-in, as in subscribe(String[], int[])
+							if (!isRefused(grantedQos[0]) || reconnectOnRefusedSubscription) {
+								subscriptions.put(topic, qos);
+							}
 							if (isRefused(grantedQos[0])) {
 								onSubscriptionRefused(topic);
 							}
@@ -1638,14 +1642,22 @@ public class TahuClient implements MqttCallbackExtended {
 						int[] grantedQos = token.getGrantedQos();
 						if (grantedQos != null && grantedQos.length == topics.length) {
 							/*
-							 * Every topic is kept, refused or not, as the single-topic subscribe() keeps it, so none is
-							 * lost from the re-subscribe on the next connection. The connection is cycled at most once.
+							 * Every granted topic is kept, whatever its position. A refused one is kept only when the
+							 * application opted in to cycling: re-subscribing it in connectComplete() is refused again
+							 * and forces a reconnect, so keeping it otherwise would reconnect forever. The connection
+							 * is cycled at most once.
 							 */
 							String refused = null;
 							for (int i = 0; i < topics.length; i++) {
-								subscriptions.put(topics[i], qos[i]);
-								if (refused == null && isRefused(grantedQos[i])) {
-									refused = topics[i];
+								if (!isRefused(grantedQos[i])) {
+									subscriptions.put(topics[i], qos[i]);
+								} else {
+									if (reconnectOnRefusedSubscription) {
+										subscriptions.put(topics[i], qos[i]);
+									}
+									if (refused == null) {
+										refused = topics[i];
+									}
 								}
 							}
 

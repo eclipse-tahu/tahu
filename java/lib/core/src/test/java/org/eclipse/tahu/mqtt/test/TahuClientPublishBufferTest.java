@@ -3380,6 +3380,41 @@ public class TahuClientPublishBufferTest {
 		Assert.assertEquals(callback.connectionLostCount.get(), 1, "Two refusals must cycle the connection once");
 	}
 
+	@Test(
+			timeOut = TIMEOUT_MS)
+	@SuppressWarnings("unchecked")
+	public void aRefusalInAMultiTopicSubscribeWithoutTheOptInKeepsOnlyTheGrantedTopics() throws Exception {
+		wire(8, 8);
+		fakeClient.grantOnSyncSubscribe(new int[] { 0, 0x80, 1, 0x80 });
+
+		try {
+			tahuClient.subscribe(new String[] { "a/#", "b/#", "c/#", "d/#" }, new int[] { 0, 0, 2, 0 });
+			Assert.fail("A refusal must still be reported to the caller");
+		} catch (TahuException e) {
+			// Expected
+		}
+
+		Assert.assertEquals(((Map<String, Integer>) get(tahuClient, "subscriptions")).keySet(), Set.of("a/#", "c/#"),
+				"A refused topic must not be kept, or every reconnect would be refused and forced closed");
+		Thread.sleep(300);
+		Assert.assertEquals(callback.connectionLostCount.get(), 0, "Without the opt-in a refusal must not cycle");
+	}
+
+	@Test(
+			timeOut = TIMEOUT_MS)
+	@SuppressWarnings("unchecked")
+	public void aRefusedSingleTopicSubscribeWithoutTheOptInIsNotKept() throws Exception {
+		wire(8, 8);
+		fakeClient.grantOnSyncSubscribe(new int[] { 0x80 });
+
+		Assert.assertEquals(tahuClient.subscribe("a/#", 0), 0x80, "The refusal must be returned to the caller");
+
+		Assert.assertFalse(((Map<String, Integer>) get(tahuClient, "subscriptions")).containsKey("a/#"),
+				"A refused topic must not be kept, or every reconnect would be refused and forced closed");
+		Thread.sleep(300);
+		Assert.assertEquals(callback.connectionLostCount.get(), 0, "Without the opt-in a refusal must not cycle");
+	}
+
 	/** A connected, online client with a BIRTH topic, for a test to drive connectComplete() on. */
 	private void wireForConnectComplete() throws Exception {
 		wire(8, 8);
