@@ -30,6 +30,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.Semaphore;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -3237,6 +3238,70 @@ public class TahuClientPublishBufferTest {
 		} finally {
 			stopConnectionMonitor();
 		}
+	}
+
+	/**
+	 * The SUBACK watchdog thread is shared by every client through a static executor. If it never exited it would
+	 * keep this class loader reachable for the life of the JVM, and a host that loads the library per module (an
+	 * Ignition gateway) would retain the previous module's whole heap on every module restart - IMM-742. Once the
+	 * SUBACKs are confirmed and nothing is pending, the thread must be gone.
+	 */
+	@Test(
+			timeOut = TIMEOUT_MS)
+	public void theSubAckWatchdogThreadExitsOnceNothingIsPending() throws Exception {
+		wireForConnectComplete();
+		tahuClient.setSubAckTimeout(300);
+		addSubscription("spBv1.0/#", 0);
+
+		/*
+		 * The executor is shared by every client in this JVM, and other tests here leave clients connected with
+		 * their 60-second default timeouts still queued. Those keep the thread alive, correctly, so start this test
+		 * from an empty queue: it is the pending-work rule that is under test, not the other tests' leftovers.
+		 */
+		Field watchdogExecutor = TahuClient.class.getDeclaredField("SUBACK_WATCHDOG");
+		watchdogExecutor.setAccessible(true);
+		((ScheduledThreadPoolExecutor) watchdogExecutor.get(null)).getQueue().clear();
+
+		try {
+			tahuClient.connectComplete(false, "tcp://localhost:1883");
+			Assert.assertNotNull(get(tahuClient, "subAckWatchdog"), "Precondition: a timeout is pending");
+			Assert.assertTrue(isSubAckWatchdogThreadAlive(), "Precondition: the watchdog thread is running");
+
+			fakeClient.subAck(0, new int[] { 0 });
+			Assert.assertNull(get(tahuClient, "subAckWatchdog"), "Confirmed SUBACKs must cancel the timeout");
+
+			awaitTrue(() -> !isSubAckWatchdogThreadAlive(),
+					"The watchdog thread must exit once no SUBACK timeout is pending");
+		} finally {
+			stopConnectionMonitor();
+		}
+	}
+
+	/**
+	 * The idle timeout must never cost a pending timeout its thread. A SUBACK timeout longer than the thread's
+	 * keep-alive still has to fire: the last worker stays while a task is queued, however long it has been idle.
+	 */
+	@Test(
+			timeOut = TIMEOUT_MS)
+	public void aSubAckTimeoutLongerThanTheThreadKeepAliveStillFires() throws Exception {
+		wireForConnectComplete();
+		tahuClient.setSubAckTimeout(1500);
+		addSubscription("spBv1.0/#", 0);
+
+		try {
+			tahuClient.connectComplete(false, "tcp://localhost:1883");
+
+			awaitTrue(() -> callback.connectionLostCount.get() == 1,
+					"A timeout longer than the watchdog thread's idle keep-alive must still cycle the connection");
+			Assert.assertNull(get(tahuClient, "client"), "The session whose SUBACKs never came must be torn down");
+		} finally {
+			stopConnectionMonitor();
+		}
+	}
+
+	private static boolean isSubAckWatchdogThreadAlive() {
+		return Thread.getAllStackTraces().keySet().stream()
+				.anyMatch(thread -> "TahuSubAckWatchdog".equals(thread.getName()) && thread.isAlive());
 	}
 
 	/** The SUBACK timeout is cancelled once the SUBACKs are in, so a healthy connect leaves nothing scheduled. */

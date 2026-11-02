@@ -377,8 +377,13 @@ public class TahuClient implements MqttCallbackExtended {
 
 	/*
 	 * One daemon thread shared by every client for the SUBACK timeouts, rather than a sleeping thread per connect.
-	 * Cancelled tasks are removed straight away, so a healthy connect leaves nothing behind.
+	 * Cancelled tasks are removed straight away, so a healthy connect leaves nothing behind, and the thread itself
+	 * exits once it has been idle for SUBACK_WATCHDOG_IDLE_MILLIS. A static executor whose thread never exited would
+	 * keep this class loader reachable for the life of the JVM: in a host that loads the library per module, such as
+	 * an Ignition gateway, every module restart would then retain the previous module's whole heap. See IMM-742.
 	 */
+	private static final long SUBACK_WATCHDOG_IDLE_MILLIS = 1000L;
+
 	private static final ScheduledThreadPoolExecutor SUBACK_WATCHDOG = createSubAckWatchdogExecutor();
 
 	// The pending SUBACK timeout for the current connection, if any. Written under clientLock.
@@ -3358,6 +3363,14 @@ public class TahuClient implements MqttCallbackExtended {
 			return thread;
 		});
 		executor.setRemoveOnCancelPolicy(true);
+		/*
+		 * Let the single core thread exit when nothing is pending. A worker never gives up while it is the last one
+		 * and the queue still holds a task (ThreadPoolExecutor.getTask), so a scheduled timeout always has a thread to
+		 * run it; the only effect is that the thread is gone a second after the last SUBACK is confirmed or the last
+		 * client disconnects, instead of pinning the class loader until the JVM exits.
+		 */
+		executor.setKeepAliveTime(SUBACK_WATCHDOG_IDLE_MILLIS, TimeUnit.MILLISECONDS);
+		executor.allowCoreThreadTimeOut(true);
 		return executor;
 	}
 
