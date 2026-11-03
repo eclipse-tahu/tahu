@@ -384,7 +384,7 @@ public class SparkplugBPayloadDecoder implements PayloadDecoder<SparkplugBPayloa
 			uInt8ByteBuffer.order(ByteOrder.LITTLE_ENDIAN);
 			while (uInt8ByteBuffer.hasRemaining()) {
 				byte value = uInt8ByteBuffer.get();
-				uInt8List.add(value >= 0 ? (short) value : (short) (0x10000 + value));
+				uInt8List.add((short) (value & 0xFF));
 			}
 			return uInt8List.toArray(new Short[0]);
 		} else if (metricType == MetricDataType.UInt16Array.toIntValue()) {
