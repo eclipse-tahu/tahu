@@ -106,6 +106,12 @@ public class TahuClientPublishBufferTest {
 	@AfterMethod
 	public void tearDown() throws Exception {
 		if (tahuClient != null) {
+			// Any test that reached connectComplete() started a monitor, whether or not it stopped it itself
+			Object monitorThread = get(tahuClient, "connectionMonitorThread");
+			stopConnectionMonitor();
+			Assert.assertFalse(monitorThread != null && ((Thread) monitorThread).isAlive(),
+					"The ConnectionMonitor thread outlived its test");
+
 			/*
 			 * Bounded, because the shutdown needs publishOrderLock and a deadlock regression is exactly the state
 			 * where nobody can have it. Left unbounded, a client wedged that way would hang the JVM here and the
@@ -2279,10 +2285,7 @@ public class TahuClientPublishBufferTest {
 			Assert.assertTrue(fakeClient.publishedTopics().contains(LWT_TOPIC),
 					"The death certificate must still be published - only the wait for it is dropped");
 		} finally {
-			Object monitorThread = get(tahuClient, "connectionMonitorThread");
-			if (monitorThread != null) {
-				((Thread) monitorThread).interrupt();
-			}
+			stopConnectionMonitor();
 		}
 	}
 
@@ -3636,10 +3639,16 @@ public class TahuClientPublishBufferTest {
 		((Map<String, Integer>) get(tahuClient, "subscriptions")).put(topic, qos);
 	}
 
+	/*
+	 * Stops the monitor the way the client does: shutdown() clears its keep-running flag, then interrupts. An interrupt
+	 * alone is not enough - ConnectionMonitor re-asserts it and loops, so every later sleep() throws at once and the
+	 * thread spins on clientLock for the rest of the JVM, slowing every test that runs after this one.
+	 */
 	private void stopConnectionMonitor() throws Exception {
 		Object monitorThread = get(tahuClient, "connectionMonitorThread");
 		if (monitorThread != null) {
-			((Thread) monitorThread).interrupt();
+			invoke(monitorThread, "shutdown");
+			((Thread) monitorThread).join(2000);
 		}
 	}
 
