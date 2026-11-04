@@ -42,6 +42,8 @@ import org.eclipse.paho.client.mqttv3.IMqttActionListener;
 import org.eclipse.paho.client.mqttv3.IMqttAsyncClient;
 import org.eclipse.paho.client.mqttv3.IMqttDeliveryToken;
 import org.eclipse.paho.client.mqttv3.IMqttToken;
+import org.eclipse.paho.client.mqttv3.MqttCallback;
+import org.eclipse.paho.client.mqttv3.MqttCallbackExtended;
 import org.eclipse.paho.client.mqttv3.MqttException;
 import org.eclipse.paho.client.mqttv3.MqttMessage;
 import org.eclipse.paho.client.mqttv3.internal.wire.MqttWireMessage;
@@ -755,6 +757,124 @@ public class TahuClientPublishBufferTest {
 		Assert.assertEquals(tahuClient.getPublishBufferDepth(), 0);
 		Assert.assertEquals(fakeClient.publishedTopics(), List.of(),
 				"No message queued before the disconnect may reach the MQTT server on the next session");
+	}
+
+	/**
+	 * A lost session must not leave its drain thread behind.
+	 *
+	 * disconnect() used to be the only thing that stopped the drain, so an application that replaced a client whose
+	 * connection had been lost - building a new client rather than disconnecting the old one - orphaned one parked
+	 * drain thread per lost session, each holding its TahuClient from garbage collection. Against a server that
+	 * dropped every session that grew without bound until the process ran out of threads.
+	 */
+	@Test(
+			timeOut = TIMEOUT_MS)
+	public void lostSessionStopsItsDrainThread() throws Exception {
+		wire(0, 8);
+		Object drain = get(tahuClient, "publishBufferDrain");
+		Thread drainThread = (Thread) get(tahuClient, "publishBufferDrainThread");
+		bindDrain(drain, fakeClient);
+		for (int i = 0; i < 3; i++) {
+			tahuClient.publish("topic/queued-" + i, "x".getBytes(), 1, false);
+		}
+		Assert.assertEquals(tahuClient.getPublishBufferDepth(), 3, "Precondition: the messages are queued");
+
+		fakeClient.markDisconnected();
+		// Without the client, as the TRACE dump in connectionLost() needs a real Paho session. The drain is matched
+		// to the lost session through its callback, not through this field.
+		set(tahuClient, "client", null);
+		newSessionCallback(fakeClient).connectionLost(new Exception("connection closed by the server"));
+
+		Assert.assertNull(get(tahuClient, "publishBufferDrain"), "The lost session's drain must be stopped");
+		Assert.assertNull(get(tahuClient, "publishBufferDrainThread"), "The drain thread reference must be cleared");
+		drainThread.join(2000);
+		Assert.assertFalse(drainThread.isAlive(), "The drain thread itself must exit, not just be forgotten");
+		Assert.assertEquals(tahuClient.getPublishBufferDepth(), 0, "Nothing may be left queued for a dead session");
+		Assert.assertEquals(tahuClient.getPublishBufferDiscardedMessageCount(), 3,
+				"The discarded messages must be counted - publish() told their callers they were queued");
+		Assert.assertEquals(callback.connectionLostCount.get(), 1,
+				"The application must still be told the connection was lost");
+	}
+
+	/**
+	 * A connectionLost() from an older session must not stop the drain a newer session is using.
+	 *
+	 * The callback can arrive late - a reconnect can already have built the next session and started its drain by the
+	 * time the old client reports. Stopping that drain would leave the live session unable to buffer at all.
+	 */
+	@Test(
+			timeOut = TIMEOUT_MS)
+	public void lateConnectionLostFromAnOlderSessionLeavesTheNewDrainRunning() throws Exception {
+		wire(4, 8);
+		bindDrain(get(tahuClient, "publishBufferDrain"), fakeClient);
+
+		// Stand in for the next connect(): the old drain is stopped and a new one is started for a new client
+		invoke(tahuClient, "shutdownPublishBufferDrainThread");
+		FakeMqttClient nextSession = new FakeMqttClient();
+		set(tahuClient, "client", nextSession);
+		startDrain();
+		Object newDrain = get(tahuClient, "publishBufferDrain");
+		bindDrain(newDrain, nextSession);
+
+		fakeClient.markDisconnected();
+		// Without the client, as the TRACE dump in connectionLost() needs a real Paho session
+		set(tahuClient, "client", null);
+		newSessionCallback(fakeClient).connectionLost(new Exception("late report from the old session"));
+		set(tahuClient, "client", nextSession);
+
+		Assert.assertSame(get(tahuClient, "publishBufferDrain"), newDrain,
+				"A loss reported by an older session must not stop the current session's drain");
+		Assert.assertTrue(((Thread) get(tahuClient, "publishBufferDrainThread")).isAlive(),
+				"The current session's drain thread must still be running");
+	}
+
+	/**
+	 * A drain stopped between its start and its bind must not be bound - otherwise a newer session's drain would be
+	 * recorded against the older client, and that session's loss would no longer stop it.
+	 */
+	@Test(
+			timeOut = TIMEOUT_MS)
+	public void aStoppedDrainIsNotBoundToItsSession() throws Exception {
+		wire(4, 8);
+		Object staleDrain = get(tahuClient, "publishBufferDrain");
+		invoke(tahuClient, "shutdownPublishBufferDrainThread");
+		startDrain();
+
+		bindDrain(staleDrain, fakeClient);
+
+		Assert.assertNull(get(tahuClient, "publishBufferDrainSession"),
+				"A drain that is no longer running must not be bound to anything");
+	}
+
+	/**
+	 * A drain reused by the next session must not still answer to the previous one. Otherwise a late connectionLost()
+	 * from the old session, landing between the reuse and the bind, stops it - the bind is then skipped and the new
+	 * session has no drain, so every publish it would buffer is refused.
+	 */
+	@Test(
+			timeOut = TIMEOUT_MS)
+	public void aReusedDrainIsNotStoppedByItsPreviousSessionsLoss() throws Exception {
+		wire(4, 8);
+		Object drain = get(tahuClient, "publishBufferDrain");
+		bindDrain(drain, fakeClient);
+
+		// The next connect() reuses the running drain rather than starting another
+		Assert.assertSame(invoke(tahuClient, "startPublishBufferDrainThread"), drain,
+				"Precondition: the running drain is reused");
+
+		fakeClient.markDisconnected();
+		// Without the client, as the TRACE dump in connectionLost() needs a real Paho session
+		set(tahuClient, "client", null);
+		newSessionCallback(fakeClient).connectionLost(new Exception("late report from the previous session"));
+
+		FakeMqttClient nextSession = new FakeMqttClient();
+		set(tahuClient, "client", nextSession);
+		bindDrain(drain, nextSession);
+
+		Assert.assertSame(get(tahuClient, "publishBufferDrain"), drain,
+				"The previous session's loss must not stop a drain the next session has reused");
+		Assert.assertSame(get(tahuClient, "publishBufferDrainSession"), nextSession,
+				"The reused drain must be bound to the next session");
 	}
 
 	/**
@@ -3572,6 +3692,23 @@ public class TahuClientPublishBufferTest {
 		invoke(tahuClient, "startPublishBufferDrainThread");
 	}
 
+	/* Binds a drain to a session's client, as connect() does once it has built the client. */
+	private void bindDrain(Object drain, TahuMqttAsyncClient session) throws Exception {
+		Method bind = TahuClient.class.getDeclaredMethod("bindPublishBufferDrain", drain.getClass(),
+				TahuMqttAsyncClient.class);
+		bind.setAccessible(true);
+		bind.invoke(tahuClient, drain, session);
+	}
+
+	/* The callback connect() installs on a session's Paho client - the route a lost connection is reported by. */
+	private MqttCallbackExtended newSessionCallback(TahuMqttAsyncClient session) throws Exception {
+		Class<?> type = Class.forName(TahuClient.class.getName() + "$SessionCallback");
+		Constructor<?> constructor = type.getDeclaredConstructor(TahuClient.class, TahuMqttAsyncClient.class,
+				MqttCallback.class);
+		constructor.setAccessible(true);
+		return (MqttCallbackExtended) constructor.newInstance(tahuClient, session, tahuClient);
+	}
+
 	private void releasePermits(int count) throws Exception {
 		semaphore().release(count);
 	}
@@ -3699,10 +3836,10 @@ public class TahuClientPublishBufferTest {
 		return field.get(target);
 	}
 
-	private static void invoke(Object target, String methodName) throws Exception {
+	private static Object invoke(Object target, String methodName) throws Exception {
 		Method method = target.getClass().getDeclaredMethod(methodName);
 		method.setAccessible(true);
-		method.invoke(target);
+		return method.invoke(target);
 	}
 
 	private static Field findField(Class<?> type, String name) throws NoSuchFieldException {

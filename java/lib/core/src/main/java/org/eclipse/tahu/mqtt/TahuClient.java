@@ -288,6 +288,13 @@ public class TahuClient implements MqttCallbackExtended {
 	private Thread publishBufferDrainThread;
 
 	/*
+	 * The Paho client the running drain was started for, guarded by publishOrderLock. connectionLost() stops the
+	 * drain only when the lost session is this one - a late callback from an older session must never stop the drain
+	 * a newer session is relying on. Null until the session's client exists, and whenever no drain is running.
+	 */
+	private TahuMqttAsyncClient publishBufferDrainSession;
+
+	/*
 	 * Retrying or escalating a BIRTH must not happen on the thread that delivers the acknowledgements it is waiting
 	 * for. Paho dispatches deliveryComplete(), messageArrived() and connectComplete() from a single callback thread,
 	 * and two of the three routes into publishBirthMessage() arrive on it - so a wait taken there blocks the only
@@ -1215,10 +1222,18 @@ public class TahuClient implements MqttCallbackExtended {
 		}
 	}
 
-	private void startPublishBufferDrainThread() {
+	/*
+	 * Returns the drain now running - the one started here, or the one that already was - so the caller can bind it
+	 * to the session it builds with bindPublishBufferDrain().
+	 */
+	private PublishBufferDrain startPublishBufferDrainThread() {
 		synchronized (publishOrderLock) {
 			if (publishBufferDrain != null) {
-				return;
+				// Unbound until the caller binds it to its new session. Left tied to the previous one, a late
+				// connectionLost() from that session could stop it first - and the bind would then be skipped,
+				// leaving the new session with no drain at all.
+				publishBufferDrainSession = null;
+				return publishBufferDrain;
 			}
 
 			/*
@@ -1237,8 +1252,55 @@ public class TahuClient implements MqttCallbackExtended {
 			publishBufferDrainThread = new Thread(publishBufferDrain,
 					"TahuPublishBufferDrain-" + getClientId().getMqttClientId());
 			publishBufferDrainThread.setDaemon(true);
+			publishBufferDrainSession = null;
 			publishBufferDrainThread.start();
 			logger.debug("{}: Started the publish buffer drain thread", getClientId());
+			return publishBufferDrain;
+		}
+	}
+
+	/*
+	 * Binds the drain to the Paho client of the session it was started for. Skipped if that drain has been stopped
+	 * in the meantime - a teardown can land between the start and the bind, and a newer session's drain must not be
+	 * bound to this older client.
+	 */
+	private void bindPublishBufferDrain(PublishBufferDrain drain, TahuMqttAsyncClient session) {
+		synchronized (publishOrderLock) {
+			if (drain != null && publishBufferDrain == drain) {
+				publishBufferDrainSession = session;
+			}
+		}
+	}
+
+	/*
+	 * Stops the drain when the session it serves is lost.
+	 *
+	 * disconnect() is otherwise the only thing that stops it, so an application that replaces a client whose
+	 * connection was lost - building a new client rather than disconnecting the old one - left the old drain parked
+	 * in wait() for the life of the JVM, holding this client and its buffer from garbage collection. A server that
+	 * drops every session made that one thread per reconnect, without bound.
+	 *
+	 * Nothing deliverable is lost by stopping it here. publish() refuses everything once the connection is down, so
+	 * nothing new reaches the buffer, and the next session's startPublishBufferDrainThread() discards whatever the
+	 * lost session left in it anyway. Stopping now only brings that discard forward.
+	 */
+	private void shutdownPublishBufferDrainForLostSession(TahuMqttAsyncClient session) {
+		try {
+			final Thread drainThread;
+			synchronized (publishOrderLock) {
+				// The identity test and the stop share one critical section, so a newer session cannot start its
+				// drain in between and have it stopped in place of this one
+				if (publishBufferDrain == null || session == null || publishBufferDrainSession != session) {
+					return;
+				}
+				logger.debug("{}: Stopping the publish buffer drain thread - its session was lost", getClientId());
+				drainThread = stopPublishBufferDrain();
+			}
+			if (drainThread != null) {
+				drainThread.interrupt();
+			}
+		} catch (Exception e) {
+			logger.error("{}: Failed to stop the publish buffer drain thread of a lost session", getClientId(), e);
 		}
 	}
 
@@ -1359,41 +1421,53 @@ public class TahuClient implements MqttCallbackExtended {
 	private void shutdownPublishBufferDrainThread() {
 		final Thread drainThread;
 		synchronized (publishOrderLock) {
-			/*
-			 * Discard FIRST, and unconditionally - above the drain == null guard, not below it.
-			 *
-			 * A message can reach the buffer after the drain has already been stopped: publish() admits anything
-			 * while client.isConnected() is true, which it remains from here until disconnectForcibly(), including
-			 * across the deliberate sleep in disconnect(). Nothing owns those entries. Discarding them below the
-			 * guard meant the next disconnect - connect() calls one before every attempt, and by then the drain is
-			 * already null - returned without clearing, so connect()'s new drain thread found a non-empty buffer and
-			 * flushed the previous session's messages onto the new connection. For a death certificate that is a
-			 * retained "offline" arriving on a live session, ahead of the BIRTH queued behind it.
-			 */
-			if (!publishBuffer.isEmpty()) {
-				// Counted, not just logged: publish() told these callers the message was queued, not lost, so this
-				// is the only place the loss can be reported to them - see getPublishBufferDiscardedMessageCount().
-				publishBufferDiscardedMessageCount += publishBuffer.size();
-				logger.warn("{}: Discarding {} buffered publishes ({} bytes) on shutdown", getClientId(),
-						publishBuffer.size(), publishBufferBytes);
-				bufferClear();
-			}
-			publishOrderLock.notifyAll();
-
-			if (publishBufferDrain == null) {
-				return;
-			}
-			publishBufferDrain.setKeepRunning(false);
-			drainThread = publishBufferDrainThread;
-			publishBufferDrain = null;
-			publishBufferDrainThread = null;
-			// Again, now that keepRunning is false, so a drain parked in wait() sees the flag rather than relying on
-			// the interrupt below to be what stops it.
-			publishOrderLock.notifyAll();
+			drainThread = stopPublishBufferDrain();
 		}
 		if (drainThread != null) {
 			drainThread.interrupt();
 		}
+	}
+
+	/*
+	 * The part of stopping the drain that needs publishOrderLock. The caller must hold it, and must interrupt the
+	 * returned thread - if any - only after releasing it, so the drain does not wake into a lock it cannot take.
+	 *
+	 * @return the drain thread to interrupt, or null if no drain was running
+	 */
+	private Thread stopPublishBufferDrain() {
+		/*
+		 * Discard FIRST, and unconditionally - above the drain == null guard, not below it.
+		 *
+		 * A message can reach the buffer after the drain has already been stopped: publish() admits anything
+		 * while client.isConnected() is true, which it remains from here until disconnectForcibly(), including
+		 * across the deliberate sleep in disconnect(). Nothing owns those entries. Discarding them below the
+		 * guard meant the next disconnect - connect() calls one before every attempt, and by then the drain is
+		 * already null - returned without clearing, so connect()'s new drain thread found a non-empty buffer and
+		 * flushed the previous session's messages onto the new connection. For a death certificate that is a
+		 * retained "offline" arriving on a live session, ahead of the BIRTH queued behind it.
+		 */
+		if (!publishBuffer.isEmpty()) {
+			// Counted, not just logged: publish() told these callers the message was queued, not lost, so this
+			// is the only place the loss can be reported to them - see getPublishBufferDiscardedMessageCount().
+			publishBufferDiscardedMessageCount += publishBuffer.size();
+			logger.warn("{}: Discarding {} buffered publishes ({} bytes) on shutdown", getClientId(),
+					publishBuffer.size(), publishBufferBytes);
+			bufferClear();
+		}
+		publishOrderLock.notifyAll();
+
+		if (publishBufferDrain == null) {
+			return null;
+		}
+		publishBufferDrain.setKeepRunning(false);
+		final Thread drainThread = publishBufferDrainThread;
+		publishBufferDrain = null;
+		publishBufferDrainThread = null;
+		publishBufferDrainSession = null;
+		// Again, now that keepRunning is false, so a drain parked in wait() sees the flag rather than relying on
+		// the caller's interrupt to be what stops it.
+		publishOrderLock.notifyAll();
+		return drainThread;
 	}
 
 	/**
@@ -2473,6 +2547,47 @@ public class TahuClient implements MqttCallbackExtended {
 	}
 
 	/**
+	 * The callback installed on each Paho client, binding it to the session it reports for.
+	 *
+	 * Paho's connectionLost() does not say which client lost its connection, and this TahuClient builds a new Paho
+	 * client for every session. Wrapping each one is what lets the lost-session cleanup act on that session alone -
+	 * everything else is delegated unchanged.
+	 */
+	private class SessionCallback implements MqttCallbackExtended {
+
+		private final TahuMqttAsyncClient session;
+		private final MqttCallback delegate;
+
+		private SessionCallback(TahuMqttAsyncClient session, MqttCallback delegate) {
+			this.session = session;
+			this.delegate = delegate;
+		}
+
+		@Override
+		public void connectionLost(Throwable cause) {
+			shutdownPublishBufferDrainForLostSession(session);
+			delegate.connectionLost(cause);
+		}
+
+		@Override
+		public void messageArrived(String topic, MqttMessage message) throws Exception {
+			delegate.messageArrived(topic, message);
+		}
+
+		@Override
+		public void deliveryComplete(IMqttDeliveryToken token) {
+			delegate.deliveryComplete(token);
+		}
+
+		@Override
+		public void connectComplete(boolean reconnect, String serverURI) {
+			if (delegate instanceof MqttCallbackExtended) {
+				((MqttCallbackExtended) delegate).connectComplete(reconnect, serverURI);
+			}
+		}
+	}
+
+	/**
 	 * A Runnable implementation for connecting the client to a broker. Will continue to attempt to connect on failure
 	 * until the client is disconnected (setting the keepConnected flag to false).
 	 */
@@ -2534,7 +2649,7 @@ public class TahuClient implements MqttCallbackExtended {
 					semaphore = new Semaphore(getMaxInflightMessages(), true);
 					lockedMessageSet = ConcurrentHashMap.newKeySet();
 				}
-				startPublishBufferDrainThread();
+				PublishBufferDrain drain = startPublishBufferDrainThread();
 
 				// Create the client instance
 				logger.info("{}: Creating the MQTT Client to {} on thread {}", getClientId(), getMqttServerUrl(),
@@ -2547,10 +2662,16 @@ public class TahuClient implements MqttCallbackExtended {
 				 * block so no reader can see a client without one. The connect itself stays outside: it is network
 				 * work and must not be done holding this lock.
 				 */
+				TahuMqttAsyncClient session;
 				synchronized (clientLock) {
-					client = new TahuMqttAsyncClient(getMqttServerUrl().toString(), getClientId().toString(), null);
-					client.setCallback(callback);
+					session = new TahuMqttAsyncClient(getMqttServerUrl().toString(), getClientId().toString(), null);
+					session.setCallback(new SessionCallback(session, callback));
+					client = session;
 				}
+
+				// Outside clientLock so publishOrderLock is never taken inside it. Nothing can lose this session
+				// before the bind, because it is not connected until this thread connects it below.
+				bindPublishBufferDrain(drain, session);
 				IMqttToken connectToken = null;
 
 				// A time stamp to track the current attempt in case the underlying client is stuck attempting forever
