@@ -884,6 +884,153 @@ public class TahuClientPublishBufferTest {
 	}
 
 	/**
+	 * A session lost while its ConnectRunnable retry loop is still running keeps its drain.
+	 *
+	 * The loop reconnects that same Paho client rather than building a new one, and nothing else starts a drain for
+	 * it. Stopped here, the reconnected session would refuse every publish it needed to buffer until the next
+	 * connect() - a server that drops each session shortly after it connects lands the loss inside the loop's
+	 * retry-interval sleep.
+	 */
+	@Test(
+			timeOut = TIMEOUT_MS)
+	public void aSessionItsRetryLoopWillReconnectKeepsItsDrainWhenLost() throws Exception {
+		wire(0, 8);
+		Object drain = get(tahuClient, "publishBufferDrain");
+		bindDrain(drain, fakeClient);
+		set(tahuClient, "retryLoopSession", fakeClient);
+
+		fakeClient.markDisconnected();
+		// Without the client, as the TRACE dump in connectionLost() needs a real Paho session
+		set(tahuClient, "client", null);
+		newSessionCallback(fakeClient).connectionLost(new Exception("dropped while the retry loop sleeps"));
+
+		// The loop reconnects the same client
+		set(tahuClient, "client", fakeClient);
+		fakeClient.markConnected();
+		tahuClient.publish("topic/after-reconnect", "x".getBytes(), 1, false);
+
+		Assert.assertSame(get(tahuClient, "publishBufferDrain"), drain,
+				"A loss the retry loop will reconnect from must not stop the drain");
+		Assert.assertSame(get(tahuClient, "publishBufferDrainSession"), fakeClient,
+				"The drain must still be bound to the session the loop reconnects");
+		Assert.assertEquals(tahuClient.getPublishBufferDepth(), 1,
+				"The reconnected session must still be able to buffer a publish");
+		Assert.assertEquals(callback.connectionLostCount.get(), 1,
+				"The application must still be told the connection was lost");
+	}
+
+	/**
+	 * The production wiring, through a real connect(): the session's Paho client carries a SessionCallback, the drain
+	 * is bound to that client, and a session the retry loop gives up on does not keep its drain.
+	 *
+	 * The other session tests build the callback and bind the drain by hand, so on their own they would stay green if
+	 * connect() stopped installing either. The connect reaches a real socket, refused since nothing is listening, so
+	 * the retry loop is still running when the assertions are made.
+	 */
+	@Test(
+			timeOut = 15000)
+	public void connectWiresTheSessionCallbackAndDrainToTheSessionItBuilds() throws Exception {
+		tahuClient.connect();
+		awaitTrue(() -> {
+			try {
+				Object session = get(tahuClient, "client");
+				return session != null && get(tahuClient, "publishBufferDrainSession") == session
+						&& get(tahuClient, "retryLoopSession") == session;
+			} catch (Exception e) {
+				throw new IllegalStateException(e);
+			}
+		}, "connect() must build a session, bind the drain to it and retry it");
+		TahuMqttAsyncClient session = (TahuMqttAsyncClient) get(tahuClient, "client");
+		Thread drainThread = (Thread) get(tahuClient, "publishBufferDrainThread");
+		try {
+			Object installed = get(session, "mqttCallback");
+			Assert.assertEquals(installed.getClass().getName(), TahuClient.class.getName() + "$SessionCallback",
+					"The session's Paho client must report through a SessionCallback bound to it");
+
+			// Lost while the loop is still retrying it: the drain stays
+			((MqttCallback) installed).connectionLost(new Exception("lost while the retry loop runs"));
+			Assert.assertTrue(drainThread.isAlive(), "A session the loop is still retrying must keep its drain");
+
+			// The loop gives up: the drain goes with it
+			invoke(get(tahuClient, "connectRunnable"), "stopConnectAttempts");
+			((Thread) get(tahuClient, "connectRunnableThread")).interrupt();
+			drainThread.join(3000);
+			Assert.assertFalse(drainThread.isAlive(), "A session the retry loop gave up on must not keep its drain");
+			Assert.assertNull(get(tahuClient, "retryLoopSession"), "The loop must clear its session as it exits");
+		} finally {
+			session.close(true);
+		}
+	}
+
+	/**
+	 * The SessionCallback wraps every Paho callback, so a dropped forward would break BIRTH, delivery or message
+	 * handling with nothing else failing. Each callback must reach the delegate once, with its arguments, and a
+	 * plain MqttCallback delegate - which has no connectComplete() - must be tolerated.
+	 */
+	@Test(
+			timeOut = TIMEOUT_MS)
+	public void theSessionCallbackForwardsEveryCallbackToItsDelegate() throws Exception {
+		List<String> calls = new ArrayList<>();
+		MqttMessage message = new MqttMessage("x".getBytes());
+		FakeDeliveryToken token = new FakeDeliveryToken(7);
+		Exception cause = new Exception("lost");
+		MqttCallbackExtended extended = new MqttCallbackExtended() {
+			@Override
+			public void connectionLost(Throwable t) {
+				calls.add("connectionLost:" + (t == cause));
+			}
+
+			@Override
+			public void messageArrived(String topic, MqttMessage m) {
+				calls.add("messageArrived:" + topic + ":" + (m == message));
+			}
+
+			@Override
+			public void deliveryComplete(IMqttDeliveryToken t) {
+				calls.add("deliveryComplete:" + (t == token));
+			}
+
+			@Override
+			public void connectComplete(boolean reconnect, String serverURI) {
+				calls.add("connectComplete:" + reconnect + ":" + serverURI);
+			}
+		};
+
+		MqttCallbackExtended wrapper = newSessionCallback(fakeClient, extended);
+		wrapper.messageArrived("a/topic", message);
+		wrapper.deliveryComplete(token);
+		wrapper.connectComplete(true, "tcp://server:1883");
+		wrapper.connectionLost(cause);
+		Assert.assertEquals(calls, List.of("messageArrived:a/topic:true", "deliveryComplete:true",
+				"connectComplete:true:tcp://server:1883", "connectionLost:true"));
+
+		calls.clear();
+		MqttCallback plain = new MqttCallback() {
+			@Override
+			public void connectionLost(Throwable t) {
+				calls.add("connectionLost");
+			}
+
+			@Override
+			public void messageArrived(String topic, MqttMessage m) {
+				calls.add("messageArrived");
+			}
+
+			@Override
+			public void deliveryComplete(IMqttDeliveryToken t) {
+				calls.add("deliveryComplete");
+			}
+		};
+		MqttCallbackExtended plainWrapper = newSessionCallback(fakeClient, plain);
+		plainWrapper.connectComplete(false, "tcp://server:1883");
+		plainWrapper.messageArrived("a/topic", message);
+		plainWrapper.deliveryComplete(token);
+		plainWrapper.connectionLost(cause);
+		Assert.assertEquals(calls, List.of("messageArrived", "deliveryComplete", "connectionLost"),
+				"A plain MqttCallback delegate must get every callback it has, and connectComplete() must not fail");
+	}
+
+	/**
 	 * Once the drain is gone, a message that would be buffered is refused rather than accepted.
 	 *
 	 * The client still reports connected from the drain shutdown until disconnectForcibly(), so publish() used to
@@ -3711,11 +3858,16 @@ public class TahuClientPublishBufferTest {
 
 	/* The callback connect() installs on a session's Paho client - the route a lost connection is reported by. */
 	private MqttCallbackExtended newSessionCallback(TahuMqttAsyncClient session) throws Exception {
+		return newSessionCallback(session, tahuClient);
+	}
+
+	private MqttCallbackExtended newSessionCallback(TahuMqttAsyncClient session, MqttCallback delegate)
+			throws Exception {
 		Class<?> type = Class.forName(TahuClient.class.getName() + "$SessionCallback");
 		Constructor<?> constructor = type.getDeclaredConstructor(TahuClient.class, TahuMqttAsyncClient.class,
 				MqttCallback.class);
 		constructor.setAccessible(true);
-		return (MqttCallbackExtended) constructor.newInstance(tahuClient, session, tahuClient);
+		return (MqttCallbackExtended) constructor.newInstance(tahuClient, session, delegate);
 	}
 
 	private void releasePermits(int count) throws Exception {

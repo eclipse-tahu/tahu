@@ -295,6 +295,14 @@ public class TahuClient implements MqttCallbackExtended {
 	private TahuMqttAsyncClient publishBufferDrainSession;
 
 	/*
+	 * The Paho client a ConnectRunnable retry loop is still connecting, or null when no loop is running. The loop
+	 * reconnects that same client after a loss - it builds no new one - so a loss reported while it runs must leave
+	 * the drain alone: nothing else would start one, and every publish the reconnected session buffered would be
+	 * refused until the next connect(). The loop stops the drain itself if the session is not connected when it exits.
+	 */
+	private volatile TahuMqttAsyncClient retryLoopSession;
+
+	/*
 	 * Retrying or escalating a BIRTH must not happen on the thread that delivers the acknowledgements it is waiting
 	 * for. Paho dispatches deliveryComplete(), messageArrived() and connectComplete() from a single callback thread,
 	 * and two of the three routes into publishBirthMessage() arrive on it - so a wait taken there blocks the only
@@ -2565,7 +2573,10 @@ public class TahuClient implements MqttCallbackExtended {
 
 		@Override
 		public void connectionLost(Throwable cause) {
-			shutdownPublishBufferDrainForLostSession(session);
+			// A session its retry loop is still connecting keeps its drain - the loop reconnects this same client
+			if (retryLoopSession != session) {
+				shutdownPublishBufferDrainForLostSession(session);
+			}
 			delegate.connectionLost(cause);
 		}
 
@@ -2678,6 +2689,7 @@ public class TahuClient implements MqttCallbackExtended {
 				long attemptTimestamp = System.currentTimeMillis();
 
 				if (autoReconnect) {
+					retryLoopSession = session;
 					try {
 						while (!isConnected() && attemptConnects) {
 							try {
@@ -2749,6 +2761,19 @@ public class TahuClient implements MqttCallbackExtended {
 						state.setInProgress(false);
 						if (autoReconnect && !isConnected() && attemptConnects) {
 							attemptRecovery();
+						}
+					} finally {
+						/*
+						 * Cleared before the check, so a loss reported from here on stops the drain itself. A session
+						 * that is not connected now was lost, or never connected before the loop gave up, and nothing
+						 * will reconnect it - its drain must not outlive it. The identity check in the stop leaves a
+						 * drain alone once a newer session has taken it over.
+						 */
+						if (retryLoopSession == session) {
+							retryLoopSession = null;
+						}
+						if (!session.isConnected()) {
+							shutdownPublishBufferDrainForLostSession(session);
 						}
 					}
 				} else {
