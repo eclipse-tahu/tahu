@@ -228,6 +228,19 @@ public class SparkplugBPayloadDecoder implements PayloadDecoder<SparkplugBPayloa
 		}
 	}
 
+	/**
+	 * Gets the name of a Template {@link Metric}: from the birth when the {@link Metric} is addressed by its alias
+	 */
+	private String templateName(SparkplugBProto.Payload.Metric protoMetric, MetricDataTypeMap metricDataTypeMap) {
+		if (!protoMetric.hasName() && protoMetric.hasAlias() && metricDataTypeMap != null) {
+			String name = metricDataTypeMap.getMetricName(protoMetric.getAlias());
+			if (name != null) {
+				return name;
+			}
+		}
+		return protoMetric.getName();
+	}
+
 	private Object getMetricValue(SparkplugBProto.Payload.Metric protoMetric, MetricDataTypeMap metricDataTypeMap,
 			String prefix) throws Exception {
 		// Check if the null flag has been set indicating that the value is null
@@ -322,8 +335,9 @@ public class SparkplugBPayloadDecoder implements PayloadDecoder<SparkplugBPayloa
 			}
 
 			for (SparkplugBProto.Payload.Metric protoTemplateMetric : protoTemplate.getMetricsList()) {
+				String templateName = templateName(protoMetric, metricDataTypeMap);
 				Metric templateMetric = convertMetric(protoTemplateMetric, metricDataTypeMap,
-						prefix != null ? prefix + protoMetric.getName() + "/" : protoMetric.getName() + "/");
+						prefix != null ? prefix + templateName + "/" : templateName + "/");
 				if (logger.isTraceEnabled()) {
 					logger.trace("Setting template parameter name: " + templateMetric.getName() + ", type: "
 							+ templateMetric.getDataType() + ", value: " + templateMetric.getValue());
