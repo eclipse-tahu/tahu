@@ -42,6 +42,8 @@ import org.eclipse.paho.client.mqttv3.IMqttActionListener;
 import org.eclipse.paho.client.mqttv3.IMqttAsyncClient;
 import org.eclipse.paho.client.mqttv3.IMqttDeliveryToken;
 import org.eclipse.paho.client.mqttv3.IMqttToken;
+import org.eclipse.paho.client.mqttv3.MqttCallback;
+import org.eclipse.paho.client.mqttv3.MqttCallbackExtended;
 import org.eclipse.paho.client.mqttv3.MqttException;
 import org.eclipse.paho.client.mqttv3.MqttMessage;
 import org.eclipse.paho.client.mqttv3.internal.wire.MqttWireMessage;
@@ -104,6 +106,12 @@ public class TahuClientPublishBufferTest {
 	@AfterMethod
 	public void tearDown() throws Exception {
 		if (tahuClient != null) {
+			// Any test that reached connectComplete() started a monitor, whether or not it stopped it itself
+			Object monitorThread = get(tahuClient, "connectionMonitorThread");
+			stopConnectionMonitor();
+			Assert.assertFalse(monitorThread != null && ((Thread) monitorThread).isAlive(),
+					"The ConnectionMonitor thread outlived its test");
+
 			/*
 			 * Bounded, because the shutdown needs publishOrderLock and a deadlock regression is exactly the state
 			 * where nobody can have it. Left unbounded, a client wedged that way would hang the JVM here and the
@@ -755,6 +763,271 @@ public class TahuClientPublishBufferTest {
 		Assert.assertEquals(tahuClient.getPublishBufferDepth(), 0);
 		Assert.assertEquals(fakeClient.publishedTopics(), List.of(),
 				"No message queued before the disconnect may reach the MQTT server on the next session");
+	}
+
+	/**
+	 * A lost session must not leave its drain thread behind.
+	 *
+	 * disconnect() used to be the only thing that stopped the drain, so an application that replaced a client whose
+	 * connection had been lost - building a new client rather than disconnecting the old one - orphaned one parked
+	 * drain thread per lost session, each holding its TahuClient from garbage collection. Against a server that
+	 * dropped every session that grew without bound until the process ran out of threads.
+	 */
+	@Test(
+			timeOut = TIMEOUT_MS)
+	public void lostSessionStopsItsDrainThread() throws Exception {
+		wire(0, 8);
+		Object drain = get(tahuClient, "publishBufferDrain");
+		Thread drainThread = (Thread) get(tahuClient, "publishBufferDrainThread");
+		bindDrain(drain, fakeClient);
+		for (int i = 0; i < 3; i++) {
+			tahuClient.publish("topic/queued-" + i, "x".getBytes(), 1, false);
+		}
+		Assert.assertEquals(tahuClient.getPublishBufferDepth(), 3, "Precondition: the messages are queued");
+
+		fakeClient.markDisconnected();
+		// Without the client, as the TRACE dump in connectionLost() needs a real Paho session. The drain is matched
+		// to the lost session through its callback, not through this field.
+		set(tahuClient, "client", null);
+		newSessionCallback(fakeClient).connectionLost(new Exception("connection closed by the server"));
+
+		Assert.assertNull(get(tahuClient, "publishBufferDrain"), "The lost session's drain must be stopped");
+		Assert.assertNull(get(tahuClient, "publishBufferDrainThread"), "The drain thread reference must be cleared");
+		drainThread.join(2000);
+		Assert.assertFalse(drainThread.isAlive(), "The drain thread itself must exit, not just be forgotten");
+		Assert.assertEquals(tahuClient.getPublishBufferDepth(), 0, "Nothing may be left queued for a dead session");
+		Assert.assertEquals(tahuClient.getPublishBufferDiscardedMessageCount(), 3,
+				"The discarded messages must be counted - publish() told their callers they were queued");
+		Assert.assertEquals(callback.connectionLostCount.get(), 1,
+				"The application must still be told the connection was lost");
+	}
+
+	/**
+	 * A connectionLost() from an older session must not stop the drain a newer session is using.
+	 *
+	 * The callback can arrive late - a reconnect can already have built the next session and started its drain by the
+	 * time the old client reports. Stopping that drain would leave the live session unable to buffer at all.
+	 */
+	@Test(
+			timeOut = TIMEOUT_MS)
+	public void lateConnectionLostFromAnOlderSessionLeavesTheNewDrainRunning() throws Exception {
+		wire(4, 8);
+		bindDrain(get(tahuClient, "publishBufferDrain"), fakeClient);
+
+		// Stand in for the next connect(): the old drain is stopped and a new one is started for a new client
+		invoke(tahuClient, "shutdownPublishBufferDrainThread");
+		FakeMqttClient nextSession = new FakeMqttClient();
+		set(tahuClient, "client", nextSession);
+		startDrain();
+		Object newDrain = get(tahuClient, "publishBufferDrain");
+		bindDrain(newDrain, nextSession);
+
+		fakeClient.markDisconnected();
+		// Without the client, as the TRACE dump in connectionLost() needs a real Paho session
+		set(tahuClient, "client", null);
+		newSessionCallback(fakeClient).connectionLost(new Exception("late report from the old session"));
+		set(tahuClient, "client", nextSession);
+
+		Assert.assertSame(get(tahuClient, "publishBufferDrain"), newDrain,
+				"A loss reported by an older session must not stop the current session's drain");
+		Assert.assertTrue(((Thread) get(tahuClient, "publishBufferDrainThread")).isAlive(),
+				"The current session's drain thread must still be running");
+	}
+
+	/**
+	 * A drain stopped between its start and its bind must not be bound - otherwise a newer session's drain would be
+	 * recorded against the older client, and that session's loss would no longer stop it.
+	 */
+	@Test(
+			timeOut = TIMEOUT_MS)
+	public void aStoppedDrainIsNotBoundToItsSession() throws Exception {
+		wire(4, 8);
+		Object staleDrain = get(tahuClient, "publishBufferDrain");
+		invoke(tahuClient, "shutdownPublishBufferDrainThread");
+		startDrain();
+
+		bindDrain(staleDrain, fakeClient);
+
+		Assert.assertNull(get(tahuClient, "publishBufferDrainSession"),
+				"A drain that is no longer running must not be bound to anything");
+	}
+
+	/**
+	 * A drain reused by the next session must not still answer to the previous one. Otherwise a late connectionLost()
+	 * from the old session, landing between the reuse and the bind, stops it - the bind is then skipped and the new
+	 * session has no drain, so every publish it would buffer is refused.
+	 */
+	@Test(
+			timeOut = TIMEOUT_MS)
+	public void aReusedDrainIsNotStoppedByItsPreviousSessionsLoss() throws Exception {
+		wire(4, 8);
+		Object drain = get(tahuClient, "publishBufferDrain");
+		bindDrain(drain, fakeClient);
+
+		// The next connect() reuses the running drain rather than starting another
+		Assert.assertSame(invoke(tahuClient, "startPublishBufferDrainThread"), drain,
+				"Precondition: the running drain is reused");
+
+		fakeClient.markDisconnected();
+		// Without the client, as the TRACE dump in connectionLost() needs a real Paho session
+		set(tahuClient, "client", null);
+		newSessionCallback(fakeClient).connectionLost(new Exception("late report from the previous session"));
+
+		FakeMqttClient nextSession = new FakeMqttClient();
+		set(tahuClient, "client", nextSession);
+		bindDrain(drain, nextSession);
+
+		Assert.assertSame(get(tahuClient, "publishBufferDrain"), drain,
+				"The previous session's loss must not stop a drain the next session has reused");
+		Assert.assertSame(get(tahuClient, "publishBufferDrainSession"), nextSession,
+				"The reused drain must be bound to the next session");
+	}
+
+	/**
+	 * A session lost while its ConnectRunnable retry loop is still running keeps its drain.
+	 *
+	 * The loop reconnects that same Paho client rather than building a new one, and nothing else starts a drain for
+	 * it. Stopped here, the reconnected session would refuse every publish it needed to buffer until the next
+	 * connect() - a server that drops each session shortly after it connects lands the loss inside the loop's
+	 * retry-interval sleep.
+	 */
+	@Test(
+			timeOut = TIMEOUT_MS)
+	public void aSessionItsRetryLoopWillReconnectKeepsItsDrainWhenLost() throws Exception {
+		wire(0, 8);
+		Object drain = get(tahuClient, "publishBufferDrain");
+		bindDrain(drain, fakeClient);
+		set(tahuClient, "retryLoopSession", fakeClient);
+
+		fakeClient.markDisconnected();
+		// Without the client, as the TRACE dump in connectionLost() needs a real Paho session
+		set(tahuClient, "client", null);
+		newSessionCallback(fakeClient).connectionLost(new Exception("dropped while the retry loop sleeps"));
+
+		// The loop reconnects the same client
+		set(tahuClient, "client", fakeClient);
+		fakeClient.markConnected();
+		tahuClient.publish("topic/after-reconnect", "x".getBytes(), 1, false);
+
+		Assert.assertSame(get(tahuClient, "publishBufferDrain"), drain,
+				"A loss the retry loop will reconnect from must not stop the drain");
+		Assert.assertSame(get(tahuClient, "publishBufferDrainSession"), fakeClient,
+				"The drain must still be bound to the session the loop reconnects");
+		Assert.assertEquals(tahuClient.getPublishBufferDepth(), 1,
+				"The reconnected session must still be able to buffer a publish");
+		Assert.assertEquals(callback.connectionLostCount.get(), 1,
+				"The application must still be told the connection was lost");
+	}
+
+	/**
+	 * The production wiring, through a real connect(): the session's Paho client carries a SessionCallback, the drain
+	 * is bound to that client, and a session the retry loop gives up on does not keep its drain.
+	 *
+	 * The other session tests build the callback and bind the drain by hand, so on their own they would stay green if
+	 * connect() stopped installing either. The connect reaches a real socket, refused since nothing is listening, so
+	 * the retry loop is still running when the assertions are made.
+	 */
+	@Test(
+			timeOut = 15000)
+	public void connectWiresTheSessionCallbackAndDrainToTheSessionItBuilds() throws Exception {
+		tahuClient.connect();
+		awaitTrue(() -> {
+			try {
+				Object session = get(tahuClient, "client");
+				return session != null && get(tahuClient, "publishBufferDrainSession") == session
+						&& get(tahuClient, "retryLoopSession") == session;
+			} catch (Exception e) {
+				throw new IllegalStateException(e);
+			}
+		}, "connect() must build a session, bind the drain to it and retry it");
+		TahuMqttAsyncClient session = (TahuMqttAsyncClient) get(tahuClient, "client");
+		Thread drainThread = (Thread) get(tahuClient, "publishBufferDrainThread");
+		try {
+			Object installed = get(session, "mqttCallback");
+			Assert.assertEquals(installed.getClass().getName(), TahuClient.class.getName() + "$SessionCallback",
+					"The session's Paho client must report through a SessionCallback bound to it");
+
+			// Lost while the loop is still retrying it: the drain stays
+			((MqttCallback) installed).connectionLost(new Exception("lost while the retry loop runs"));
+			Assert.assertTrue(drainThread.isAlive(), "A session the loop is still retrying must keep its drain");
+
+			// The loop gives up: the drain goes with it
+			invoke(get(tahuClient, "connectRunnable"), "stopConnectAttempts");
+			((Thread) get(tahuClient, "connectRunnableThread")).interrupt();
+			drainThread.join(3000);
+			Assert.assertFalse(drainThread.isAlive(), "A session the retry loop gave up on must not keep its drain");
+			Assert.assertNull(get(tahuClient, "retryLoopSession"), "The loop must clear its session as it exits");
+		} finally {
+			session.close(true);
+		}
+	}
+
+	/**
+	 * The SessionCallback wraps every Paho callback, so a dropped forward would break BIRTH, delivery or message
+	 * handling with nothing else failing. Each callback must reach the delegate once, with its arguments, and a
+	 * plain MqttCallback delegate - which has no connectComplete() - must be tolerated.
+	 */
+	@Test(
+			timeOut = TIMEOUT_MS)
+	public void theSessionCallbackForwardsEveryCallbackToItsDelegate() throws Exception {
+		List<String> calls = new ArrayList<>();
+		MqttMessage message = new MqttMessage("x".getBytes());
+		FakeDeliveryToken token = new FakeDeliveryToken(7);
+		Exception cause = new Exception("lost");
+		MqttCallbackExtended extended = new MqttCallbackExtended() {
+			@Override
+			public void connectionLost(Throwable t) {
+				calls.add("connectionLost:" + (t == cause));
+			}
+
+			@Override
+			public void messageArrived(String topic, MqttMessage m) {
+				calls.add("messageArrived:" + topic + ":" + (m == message));
+			}
+
+			@Override
+			public void deliveryComplete(IMqttDeliveryToken t) {
+				calls.add("deliveryComplete:" + (t == token));
+			}
+
+			@Override
+			public void connectComplete(boolean reconnect, String serverURI) {
+				calls.add("connectComplete:" + reconnect + ":" + serverURI);
+			}
+		};
+
+		MqttCallbackExtended wrapper = newSessionCallback(fakeClient, extended);
+		wrapper.messageArrived("a/topic", message);
+		wrapper.deliveryComplete(token);
+		wrapper.connectComplete(true, "tcp://server:1883");
+		wrapper.connectionLost(cause);
+		Assert.assertEquals(calls, List.of("messageArrived:a/topic:true", "deliveryComplete:true",
+				"connectComplete:true:tcp://server:1883", "connectionLost:true"));
+
+		calls.clear();
+		MqttCallback plain = new MqttCallback() {
+			@Override
+			public void connectionLost(Throwable t) {
+				calls.add("connectionLost");
+			}
+
+			@Override
+			public void messageArrived(String topic, MqttMessage m) {
+				calls.add("messageArrived");
+			}
+
+			@Override
+			public void deliveryComplete(IMqttDeliveryToken t) {
+				calls.add("deliveryComplete");
+			}
+		};
+		MqttCallbackExtended plainWrapper = newSessionCallback(fakeClient, plain);
+		plainWrapper.connectComplete(false, "tcp://server:1883");
+		plainWrapper.messageArrived("a/topic", message);
+		plainWrapper.deliveryComplete(token);
+		plainWrapper.connectionLost(cause);
+		Assert.assertEquals(calls, List.of("messageArrived", "deliveryComplete", "connectionLost"),
+				"A plain MqttCallback delegate must get every callback it has, and connectComplete() must not fail");
 	}
 
 	/**
@@ -2159,10 +2432,7 @@ public class TahuClientPublishBufferTest {
 			Assert.assertTrue(fakeClient.publishedTopics().contains(LWT_TOPIC),
 					"The death certificate must still be published - only the wait for it is dropped");
 		} finally {
-			Object monitorThread = get(tahuClient, "connectionMonitorThread");
-			if (monitorThread != null) {
-				((Thread) monitorThread).interrupt();
-			}
+			stopConnectionMonitor();
 		}
 	}
 
@@ -3516,10 +3786,16 @@ public class TahuClientPublishBufferTest {
 		((Map<String, Integer>) get(tahuClient, "subscriptions")).put(topic, qos);
 	}
 
+	/*
+	 * Stops the monitor the way the client does: shutdown() clears its keep-running flag, then interrupts. An interrupt
+	 * alone is not enough - ConnectionMonitor re-asserts it and loops, so every later sleep() throws at once and the
+	 * thread spins on clientLock for the rest of the JVM, slowing every test that runs after this one.
+	 */
 	private void stopConnectionMonitor() throws Exception {
 		Object monitorThread = get(tahuClient, "connectionMonitorThread");
 		if (monitorThread != null) {
-			((Thread) monitorThread).interrupt();
+			invoke(monitorThread, "shutdown");
+			((Thread) monitorThread).join(2000);
 		}
 	}
 
@@ -3570,6 +3846,28 @@ public class TahuClientPublishBufferTest {
 
 	private void startDrain() throws Exception {
 		invoke(tahuClient, "startPublishBufferDrainThread");
+	}
+
+	/* Binds a drain to a session's client, as connect() does once it has built the client. */
+	private void bindDrain(Object drain, TahuMqttAsyncClient session) throws Exception {
+		Method bind = TahuClient.class.getDeclaredMethod("bindPublishBufferDrain", drain.getClass(),
+				TahuMqttAsyncClient.class);
+		bind.setAccessible(true);
+		bind.invoke(tahuClient, drain, session);
+	}
+
+	/* The callback connect() installs on a session's Paho client - the route a lost connection is reported by. */
+	private MqttCallbackExtended newSessionCallback(TahuMqttAsyncClient session) throws Exception {
+		return newSessionCallback(session, tahuClient);
+	}
+
+	private MqttCallbackExtended newSessionCallback(TahuMqttAsyncClient session, MqttCallback delegate)
+			throws Exception {
+		Class<?> type = Class.forName(TahuClient.class.getName() + "$SessionCallback");
+		Constructor<?> constructor = type.getDeclaredConstructor(TahuClient.class, TahuMqttAsyncClient.class,
+				MqttCallback.class);
+		constructor.setAccessible(true);
+		return (MqttCallbackExtended) constructor.newInstance(tahuClient, session, delegate);
 	}
 
 	private void releasePermits(int count) throws Exception {
@@ -3699,10 +3997,10 @@ public class TahuClientPublishBufferTest {
 		return field.get(target);
 	}
 
-	private static void invoke(Object target, String methodName) throws Exception {
+	private static Object invoke(Object target, String methodName) throws Exception {
 		Method method = target.getClass().getDeclaredMethod(methodName);
 		method.setAccessible(true);
-		method.invoke(target);
+		return method.invoke(target);
 	}
 
 	private static Field findField(Class<?> type, String name) throws NoSuchFieldException {
