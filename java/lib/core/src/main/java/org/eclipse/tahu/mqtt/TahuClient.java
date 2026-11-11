@@ -370,7 +370,9 @@ public class TahuClient implements MqttCallbackExtended {
 	 * False means no acknowledged LWT was published - every attempt failed, or it went out downgraded to QoS 0 - and
 	 * the only remaining way to get one published is to let the MQTT server publish the Will, which means NOT sending
 	 * a DISCONNECT packet. Covers the latest attempt in the current session, whether the disconnect made it or the
-	 * caller did beforehand; reset to true when the session is detached.
+	 * caller did beforehand; reset to true when the session is detached. A failed explicit LWT is not undone by a
+	 * later BIRTH in the same session, so that session closes without a DISCONNECT and the Will fires - harmless, as
+	 * a death certificate is accurate at the moment of disconnect.
 	 */
 	private volatile boolean lwtPublishSucceeded = true;
 
@@ -3826,7 +3828,12 @@ public class TahuClient implements MqttCallbackExtended {
 					}
 				}
 
-				if (lwtPublished && waitForLwt) {
+				/*
+				 * The same gate as detachSession(): only an acknowledgeable certificate is worth waiting for. A QoS 0
+				 * token - downgraded, or configured that way - completes only on Paho's callback thread, and this wait
+				 * holds clientLock, so it could run for keepAlive seconds on a token that carries no guarantee anyway.
+				 */
+				if (lwtPublished && waitForLwt && lwtPublishSucceeded && lwtQoS > MqttOperatorDefs.QOS0) {
 					lwtDeliveryComplete = isLwtDeliveryComplete();
 					logger.trace("{}: Completed LWT Delivery? {}", getClientId(), lwtDeliveryComplete);
 				} else {
