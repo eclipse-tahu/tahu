@@ -21,6 +21,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
+import org.eclipse.tahu.util.SparkplugUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -28,13 +29,25 @@ import com.fasterxml.jackson.annotation.JsonIgnore;
 
 /**
  * A class representing a Sparkplug B payload as a {@link Map} to prevent duplication of {@link Metric}s. This can be
- * useful for Sparkplug BIRTH payloads
+ * useful for Sparkplug BIRTH payloads.
+ * <p>
+ * Template definitions are kept apart from every other {@link Metric}. A Sparkplug BIRTH carries a Template
+ * definition under the name an instance's template reference points at, and nothing stops a Tag from carrying that
+ * same name - an instance named after its own type is the common case. The two are different things to the receiving
+ * end, which separates definitions from the rest before it resolves anything by name, so they can share a name here
+ * as well. {@link #getTemplateDefinition(String)} and {@link #removeTemplateDefinition(String)} address the
+ * definitions alone. {@link #getMetric(String)} and {@link #removeMetric(String)} address the Tags, and fall back to
+ * the definition of that name when there is no Tag, so a caller that looked a definition up by name before the two
+ * were kept apart still finds it. {@link #getMetrics()} returns the definitions first, so a receiver that handles the
+ * payload in order meets a definition before any instance of it.
  */
 public class SparkplugBPayloadMap extends SparkplugBPayload {
 
 	private static Logger logger = LoggerFactory.getLogger(SparkplugBPayloadMap.class.getName());
 
 	private final ConcurrentHashMap<String, Metric> metricMap;
+
+	private final ConcurrentHashMap<String, Metric> templateDefinitionMap;
 
 	private final Object mapLock = new Object();
 
@@ -44,6 +57,7 @@ public class SparkplugBPayloadMap extends SparkplugBPayload {
 	public SparkplugBPayloadMap() {
 		super();
 		metricMap = new ConcurrentHashMap<>();
+		templateDefinitionMap = new ConcurrentHashMap<>();
 	}
 
 	/**
@@ -58,35 +72,42 @@ public class SparkplugBPayloadMap extends SparkplugBPayload {
 	public SparkplugBPayloadMap(Date timestamp, List<Metric> metrics, long seq, String uuid, byte[] body) {
 		super(timestamp, null, seq, uuid, body);
 		metricMap = new ConcurrentHashMap<>();
+		templateDefinitionMap = new ConcurrentHashMap<>();
 		for (Metric metric : metrics) {
-			metricMap.put(metric.getName(), metric);
+			mapFor(metric).put(metric.getName(), metric);
 		}
+	}
+
+	/*
+	 * The map a Metric belongs in - Template definitions in one, everything else in the other
+	 */
+	private ConcurrentHashMap<String, Metric> mapFor(Metric metric) {
+		return SparkplugUtil.isTemplateDefinition(metric) ? templateDefinitionMap : metricMap;
 	}
 
 	/**
 	 * Adds a {@link Metric} to the {@link SparkplugBPayload}. If the {@link Metric} is already present with the same
-	 * name, it will be replaced.
+	 * name, it will be replaced. A Template definition replaces only a Template definition of the same name, never a
+	 * Tag of that name, and the other way round.
 	 *
 	 * metric the {@link Metric} to add
 	 */
 	@Override
 	public void addMetric(Metric metric) {
 		synchronized (mapLock) {
-			metricMap.put(metric.getName(), metric);
+			mapFor(metric).put(metric.getName(), metric);
 		}
 	}
 
 	/**
 	 * Adds a {@link Metric} to the {@link SparkplugBPayload}. If the {@link Metric} is already present with the same
-	 * name, it will be replaced.
+	 * name, it will be replaced - see {@link #addMetric(Metric)}.
 	 *
 	 * index this is ignored for this implementation metric the {@link Metric} to add
 	 */
 	@Override
 	public void addMetric(int index, Metric metric) {
-		synchronized (mapLock) {
-			metricMap.put(metric.getName(), metric);
-		}
+		addMetric(metric);
 	}
 
 	/**
@@ -118,7 +139,7 @@ public class SparkplugBPayloadMap extends SparkplugBPayload {
 	}
 
 	/**
-	 * Removes a {@link Metric} by equality to a {@link Metric} in the {@link List} of metrics
+	 * Removes a {@link Metric} by name - a Template definition from the definitions, anything else from the Tags.
 	 *
 	 * @param metric the {@link Metric} to remove
 	 * @return true if the {@link Metric} was removed, otherwise false
@@ -127,7 +148,9 @@ public class SparkplugBPayloadMap extends SparkplugBPayload {
 	public boolean removeMetric(Metric metric) {
 		synchronized (mapLock) {
 			if (metric != null) {
-				return removeMetric(metric.getName());
+				return SparkplugUtil.isTemplateDefinition(metric)
+						? removeTemplateDefinition(metric.getName())
+						: removeMetric(metric.getName());
 			}
 
 			return false;
@@ -135,39 +158,66 @@ public class SparkplugBPayloadMap extends SparkplugBPayload {
 	}
 
 	/**
-	 * Removes a {@link Metric} by metric name
+	 * Removes a {@link Metric} by metric name. The Tag of that name is removed when there is one; otherwise the
+	 * Template definition of that name is, as it was before definitions were kept apart. To remove a definition
+	 * regardless of a Tag of the same name, see {@link #removeTemplateDefinition(String)}.
 	 *
 	 * @param metricName the {@link String} metricName to remove
-	 * @return true if the {@link Metric} was removed, otherwise false
+	 * @return true if a {@link Metric} was removed, otherwise false
 	 */
 	public boolean removeMetric(String metricName) {
 		synchronized (mapLock) {
-			if (metricName != null) {
-				Metric removedMetric = metricMap.remove(metricName);
-				if (removedMetric != null) {
-					return true;
-				}
+			if (metricName == null) {
+				return false;
 			}
-
-			return false;
+			if (metricMap.remove(metricName) != null) {
+				return true;
+			}
+			return templateDefinitionMap.remove(metricName) != null;
 		}
 	}
 
 	/**
-	 * Gets a {@link List} of {@link Metric}s in the {@link SparkplugBPayloadMap}
+	 * Removes a Template definition by name.
+	 *
+	 * @param templateName the name of the Template definition to remove
+	 * @return true if the Template definition was removed, otherwise false
 	 */
-	@Override
-	public List<Metric> getMetrics() {
-		return new ArrayList<>(metricMap.values());
+	public boolean removeTemplateDefinition(String templateName) {
+		synchronized (mapLock) {
+			return templateName != null && templateDefinitionMap.remove(templateName) != null;
+		}
 	}
 
 	/**
-	 * Gets the number of {@link Metric}s in this {@link SparkplugBPayloadMap}
+	 * Gets a {@link List} of {@link Metric}s in the {@link SparkplugBPayloadMap} - the Template definitions first, then
+	 * everything else
+	 */
+	@Override
+	public List<Metric> getMetrics() {
+		List<Metric> metrics = new ArrayList<>(templateDefinitionMap.size() + metricMap.size());
+		metrics.addAll(templateDefinitionMap.values());
+		metrics.addAll(metricMap.values());
+		return metrics;
+	}
+
+	/**
+	 * Gets a {@link List} of the Template definitions in the {@link SparkplugBPayloadMap}
+	 *
+	 * @return the Template definition {@link Metric}s
+	 */
+	@JsonIgnore
+	public List<Metric> getTemplateDefinitions() {
+		return new ArrayList<>(templateDefinitionMap.values());
+	}
+
+	/**
+	 * Gets the number of {@link Metric}s in this {@link SparkplugBPayloadMap}, Template definitions included
 	 */
 	@Override
 	@JsonIgnore
 	public Integer getMetricCount() {
-		return metricMap.size();
+		return templateDefinitionMap.size() + metricMap.size();
 	}
 
 	/**
@@ -177,25 +227,45 @@ public class SparkplugBPayloadMap extends SparkplugBPayload {
 	 */
 	@Override
 	public void setMetrics(List<Metric> metrics) {
-		metricMap.clear();
-		for (Metric metric : metrics) {
-			metricMap.put(metric.getName(), metric);
+		synchronized (mapLock) {
+			metricMap.clear();
+			templateDefinitionMap.clear();
+			for (Metric metric : metrics) {
+				mapFor(metric).put(metric.getName(), metric);
+			}
 		}
 	}
 
 	/**
-	 * Gets a Metric for a given metric name
-	 * 
+	 * Gets a Metric for a given metric name. The Tag of that name is returned when there is one; otherwise the
+	 * Template definition of that name is, as it was before definitions were kept apart. To fetch a definition
+	 * regardless of a Tag of the same name, see {@link #getTemplateDefinition(String)}.
+	 *
 	 * @param metricName the name of the {@link Metric} to fetch
-	 * 
-	 * @return the {@link Metric} with the provided metric name
+	 *
+	 * @return the {@link Metric} with the provided metric name, or null if there is none
 	 */
 	public Metric getMetric(String metricName) {
-		return metricMap == null ? null : metricMap.get(metricName);
+		if (metricMap == null || metricName == null) {
+			return null;
+		}
+		Metric metric = metricMap.get(metricName);
+		return metric != null ? metric : getTemplateDefinition(metricName);
 	}
 
 	/**
-	 * Updates a {@link Metric} value in the {@link SparkplugBPayloadMap}
+	 * Gets the Template definition for a given name
+	 *
+	 * @param templateName the name of the Template definition to fetch
+	 * @return the Template definition {@link Metric} with the provided name, or null if there is none
+	 */
+	public Metric getTemplateDefinition(String templateName) {
+		return templateDefinitionMap == null || templateName == null ? null : templateDefinitionMap.get(templateName);
+	}
+
+	/**
+	 * Updates a {@link Metric} value in the {@link SparkplugBPayloadMap}. The update lands on the Tag of that name; a
+	 * Template definition passed in replaces the definition of its name and never becomes a Tag.
 	 * 
 	 * @param metricName the name of the metric. This is required as Aliasing may be enabled and the name may not be set
 	 *            in the {@link Metric}
@@ -205,6 +275,13 @@ public class SparkplugBPayloadMap extends SparkplugBPayload {
 		if (newMetric == null) {
 			logger.info("Metric '{}' is null during update - removing from cache", newMetricName);
 			metricMap.put(newMetricName, null);
+			return;
+		}
+
+		if (SparkplugUtil.isTemplateDefinition(newMetric)) {
+			// A definition has no value to update - a new definition replaces the one of that name
+			logger.trace("Replacing the Template definition in the map: {}", newMetric);
+			addMetric(newMetric);
 			return;
 		}
 
@@ -310,7 +387,7 @@ public class SparkplugBPayloadMap extends SparkplugBPayload {
 	 * @param date the {@link Date} timestamp to use for all {@link Metric}s in this {@link SparkplugBPayloadMap}
 	 */
 	public void updateMetricTimestamps(Date date) {
-		for (Metric metric : metricMap.values()) {
+		for (Metric metric : getMetrics()) {
 			metric.setTimestamp(date);
 			if (metric.getDataType() == MetricDataType.Template && metric.getValue() != null) {
 				updateTemplateTimestamps((Template) metric.getValue(), date);
@@ -330,7 +407,7 @@ public class SparkplugBPayloadMap extends SparkplugBPayload {
 	}
 
 	public void uptickMetricTimestamps(Date birthTimestamp) {
-		for (Metric metric : metricMap.values()) {
+		for (Metric metric : getMetrics()) {
 			Date uptickedTimestamp = new Date(metric.getTimestamp().getTime() + 1);
 			if (birthTimestamp.before(uptickedTimestamp)) {
 				metric.setTimestamp(birthTimestamp);
