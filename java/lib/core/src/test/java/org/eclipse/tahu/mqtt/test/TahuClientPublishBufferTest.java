@@ -37,6 +37,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
+import java.util.function.IntSupplier;
 
 import org.eclipse.paho.client.mqttv3.IMqttActionListener;
 import org.eclipse.paho.client.mqttv3.IMqttAsyncClient;
@@ -2912,6 +2913,103 @@ public class TahuClientPublishBufferTest {
 	}
 
 	/**
+	 * Paho refuses every PUBLISH, QoS 0 included, once its in-flight count reaches the window it was given. With
+	 * that window the same size as the publish window, a full set of unacknowledged QoS 1 messages shut out QoS 0
+	 * too - the QoS 0 LWT fallback could never succeed in the state it exists for. The MQTT client's window must
+	 * leave room beyond the publish window, and must not overflow for a very large one.
+	 */
+	@Test(
+			timeOut = TIMEOUT_MS)
+	public void theMqttClientWindowLeavesRoomForQos0BeyondThePublishWindow() throws Exception {
+		tahuClient.setMaxInflightMessages(500);
+		Assert.assertTrue((Integer) invoke(tahuClient, "getPahoMaxInflight") > 500,
+				"The MQTT client's window must exceed the publish window, or QoS 0 is refused whenever it is full");
+
+		tahuClient.setMaxInflightMessages(Integer.MAX_VALUE);
+		Assert.assertEquals(invoke(tahuClient, "getPahoMaxInflight"), Integer.MAX_VALUE,
+				"The reserve must saturate, not overflow into a negative window");
+	}
+
+	/**
+	 * A caller may publish the death certificate itself, before unsubscribing, and then disconnect with
+	 * publishLwt=false so it is not sent twice. If that explicit LWT could not be published, the disconnect must
+	 * still withhold the DISCONNECT so the Will fires. The escalation used to sit inside 'if (publishLwt)', so this
+	 * call shape sent a clean DISCONNECT and subscribers got neither the certificate nor the Will.
+	 */
+	@Test(
+			timeOut = TIMEOUT_MS)
+	public void aFailedExplicitLwtWithholdsTheDisconnectWhenTheDisconnectPublishesNoLwt() throws Exception {
+		wire(8, 8);
+		configureLwt(1);
+		fakeClient.failNextPublishes(Integer.MAX_VALUE);
+
+		// Rethrown when every route fails, which is how the caller hears of it - and why it cannot be relied on
+		Assert.expectThrows(TahuException.class, () -> tahuClient.publishLwt(false));
+		tahuClient.disconnect(0, 1, true, false, false);
+
+		Assert.assertTrue(fakeClient.disconnectForciblyCalled, "The disconnect must still complete");
+		Assert.assertFalse(fakeClient.disconnectSent,
+				"The explicit LWT failed, so the DISCONNECT must be withheld and the Will left to fire");
+	}
+
+	/**
+	 * The same call shape with the window exhausted, as in the field: the explicit LWT goes out downgraded to QoS 0,
+	 * which carries no guarantee, so the following publishLwt=false disconnect must still leave the Will to fire.
+	 */
+	@Test(
+			timeOut = TIMEOUT_MS)
+	public void aDowngradedExplicitLwtWithholdsTheDisconnectWhenTheDisconnectPublishesNoLwt() throws Exception {
+		wire(0, 8);
+		configureLwt(1);
+
+		tahuClient.publishLwt(false);
+		tahuClient.disconnect(0, 1, true, false, false);
+
+		Assert.assertEquals(fakeClient.publishedTopics(), List.of(LWT_TOPIC),
+				"The explicit LWT must go out at QoS 0, and the publishLwt=false disconnect must not send another");
+		Assert.assertFalse(fakeClient.disconnectSent,
+				"A downgraded explicit LWT is not acknowledged, so the DISCONNECT must be withheld");
+	}
+
+	/** The converse: an explicit LWT that went out at its configured QoS leaves the clean DISCONNECT standing. */
+	@Test(
+			timeOut = TIMEOUT_MS)
+	public void anAcknowledgedExplicitLwtStillSendsTheDisconnectWhenTheDisconnectPublishesNoLwt() throws Exception {
+		wire(8, 8);
+		configureLwt(1);
+
+		tahuClient.publishLwt(false);
+		tahuClient.disconnect(0, 1, true, false, false);
+
+		Assert.assertEquals(fakeClient.publishedTopics(), List.of(LWT_TOPIC));
+		Assert.assertTrue(fakeClient.disconnectSent, "An acknowledged explicit LWT needs no Will behind it");
+	}
+
+	/**
+	 * The verdict belongs to the session it was reached in. A failed LWT in one session must not withhold the
+	 * DISCONNECT of a later session's disconnect that published no LWT at all.
+	 */
+	@Test(
+			timeOut = TIMEOUT_MS)
+	public void aFailedLwtDoesNotWithholdTheNextSessionsDisconnect() throws Exception {
+		wire(8, 8);
+		configureLwt(1);
+		fakeClient.failNextPublishes(Integer.MAX_VALUE);
+		Assert.expectThrows(TahuException.class, () -> tahuClient.publishLwt(false));
+		tahuClient.disconnect(0, 1, true, false, false);
+		Assert.assertFalse(fakeClient.disconnectSent, "Precondition: the first session withheld its DISCONNECT");
+
+		// The next session: live again, and nothing fails
+		fakeClient.failNextPublishes(0);
+		fakeClient.markConnected();
+		wire(8, 8);
+		tahuClient.disconnect(0, 1, true, false, false);
+
+		Assert.assertTrue(fakeClient.disconnectSent,
+				"A disconnect that published no LWT this session must send its DISCONNECT");
+	}
+
+	/**
 	 * Backpressure that clears must not cost the session.
 	 *
 	 * An exhausted window or a queued message is the ordinary condition the publish buffer exists to absorb, and it
@@ -3822,6 +3920,16 @@ public class TahuClientPublishBufferTest {
 		set(tahuClient, "lockedMessageSet", ConcurrentHashMap.newKeySet());
 		set(tahuClient, "maxInFlightMessages", maxInflight);
 
+		// The window connect() hands Paho, with Paho enforcing it - so QoS 0 is refused here exactly when it would be
+		// in production. Read through the fields each time, since tests replace the semaphore and the limit.
+		fakeClient.modelPahoWindow((Integer) invoke(tahuClient, "getPahoMaxInflight"), () -> {
+			try {
+				return (Integer) get(tahuClient, "maxInFlightMessages") - semaphore().availablePermits();
+			} catch (Exception e) {
+				throw new IllegalStateException(e);
+			}
+		});
+
 		// A live session with no subscriptions outstanding, which is what connectComplete() leaves without any
 		set(tahuClient, "subscriptionsConfirmedGeneration", ((AtomicLong) get(tahuClient, "connectGeneration")).get());
 		startDrain();
@@ -4035,6 +4143,8 @@ public class TahuClientPublishBufferTest {
 		private final List<IMqttActionListener> subscribeListeners = new ArrayList<>();
 		private volatile int failSubscribeRequestAt = -1;
 		private volatile int[] grantOnSyncSubscribe;
+		private volatile int pahoMaxInflight = Integer.MAX_VALUE;
+		private volatile IntSupplier unacknowledgedInFlight = () -> 0;
 
 		private FakeMqttClient() throws MqttException {
 			super("tcp://localhost:1883", "test-client", null);
@@ -4146,6 +4256,18 @@ public class TahuClientPublishBufferTest {
 			failuresRemaining.set(count);
 		}
 
+		/*
+		 * Models Paho's own in-flight check, which this fake used to skip - and skipping it is how a QoS 0 LWT
+		 * fallback that could never work in production passed every test here. ClientState.send() refuses any
+		 * PUBLISH, whatever its QoS, with REASON_CODE_MAX_INFLIGHT once its in-flight count reaches the window it was
+		 * given. inFlight supplies the unacknowledged QoS > 0 count, including a message whose permit has been taken
+		 * but which has not reached publish() yet - so publish() discounts its own.
+		 */
+		private void modelPahoWindow(int maxInflight, IntSupplier inFlight) {
+			this.unacknowledgedInFlight = inFlight;
+			this.pahoMaxInflight = maxInflight;
+		}
+
 		private synchronized List<String> publishedTopics() {
 			return new ArrayList<>(published);
 		}
@@ -4204,6 +4326,11 @@ public class TahuClientPublishBufferTest {
 				failuresRemaining.decrementAndGet();
 				// 32202 == REASON_CODE_MAX_INFLIGHT, the realistic transient failure
 				throw new MqttException(32202);
+			}
+			// A QoS > 0 caller took its permit before calling, so its own message is already in the count
+			int inFlightBeforeThis = unacknowledgedInFlight.getAsInt() - (qos > 0 ? 1 : 0);
+			if (inFlightBeforeThis >= pahoMaxInflight) {
+				throw new MqttException(MqttException.REASON_CODE_MAX_INFLIGHT);
 			}
 			synchronized (this) {
 				published.add(topic);
