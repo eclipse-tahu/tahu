@@ -20,9 +20,11 @@ import java.lang.management.ThreadMXBean;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.net.ServerSocket;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Properties;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
@@ -925,24 +927,32 @@ public class TahuClientPublishBufferTest {
 	 * is bound to that client, and a session the retry loop gives up on does not keep its drain.
 	 *
 	 * The other session tests build the callback and bind the drain by hand, so on their own they would stay green if
-	 * connect() stopped installing either. The connect reaches a real socket, refused since nothing is listening, so
-	 * the retry loop is still running when the assertions are made.
+	 * connect() stopped installing either. The connect reaches a real socket, refused since nothing is listening on
+	 * it, so the retry loop is still running when the assertions are made.
 	 */
 	@Test(
 			timeOut = 15000)
 	public void connectWiresTheSessionCallbackAndDrainToTheSessionItBuilds() throws Exception {
-		tahuClient.connect();
+		TahuClient client = newTahuClientOnAClosedPort("test-client-wiring");
+		client.connect();
+
+		// Kept from the check itself: between attempts the retry loop clears the field and builds a new session
+		AtomicReference<TahuMqttAsyncClient> wired = new AtomicReference<>();
 		awaitTrue(() -> {
 			try {
-				Object session = get(tahuClient, "client");
-				return session != null && get(tahuClient, "publishBufferDrainSession") == session
-						&& get(tahuClient, "retryLoopSession") == session;
+				TahuMqttAsyncClient session = (TahuMqttAsyncClient) get(client, "client");
+				if (session != null && get(client, "publishBufferDrainSession") == session
+						&& get(client, "retryLoopSession") == session) {
+					wired.set(session);
+					return true;
+				}
+				return false;
 			} catch (Exception e) {
 				throw new IllegalStateException(e);
 			}
 		}, "connect() must build a session, bind the drain to it and retry it");
-		TahuMqttAsyncClient session = (TahuMqttAsyncClient) get(tahuClient, "client");
-		Thread drainThread = (Thread) get(tahuClient, "publishBufferDrainThread");
+		TahuMqttAsyncClient session = wired.get();
+		Thread drainThread = (Thread) get(client, "publishBufferDrainThread");
 		try {
 			Object installed = get(session, "mqttCallback");
 			Assert.assertEquals(installed.getClass().getName(), TahuClient.class.getName() + "$SessionCallback",
@@ -953,13 +963,13 @@ public class TahuClientPublishBufferTest {
 			Assert.assertTrue(drainThread.isAlive(), "A session the loop is still retrying must keep its drain");
 
 			// The loop gives up: the drain goes with it
-			invoke(get(tahuClient, "connectRunnable"), "stopConnectAttempts");
-			((Thread) get(tahuClient, "connectRunnableThread")).interrupt();
+			invoke(get(client, "connectRunnable"), "stopConnectAttempts");
+			((Thread) get(client, "connectRunnableThread")).interrupt();
 			drainThread.join(3000);
 			Assert.assertFalse(drainThread.isAlive(), "A session the retry loop gave up on must not keep its drain");
-			Assert.assertNull(get(tahuClient, "retryLoopSession"), "The loop must clear its session as it exits");
+			Assert.assertNull(get(client, "retryLoopSession"), "The loop must clear its session as it exits");
 		} finally {
-			session.close(true);
+			stopRetryingAndClose(client);
 		}
 	}
 
@@ -2941,40 +2951,33 @@ public class TahuClientPublishBufferTest {
 	 * if connect() went back to handing Paho the bare publish window, which is how the QoS 0 fallback first shipped
 	 * broken. Paho stores the window in ClientComms.connect() before the socket is opened, so a refused connect is
 	 * enough. getClientStateDebug() is also what applications read it through.
+	 *
+	 * The client targets a closed port rather than the fixture's 1883 - see newTahuClientOnAClosedPort().
 	 */
 	@Test(
 			timeOut = 15000)
 	public void connectHandsTheMqttClientTheWindowWithTheQos0Reserve() throws Exception {
-		tahuClient.setMaxInflightMessages(500);
-		tahuClient.connect();
-		awaitTrue(() -> {
-			try {
-				TahuMqttAsyncClient session = (TahuMqttAsyncClient) get(tahuClient, "client");
-				return session != null && session.getClientStateDebug() != null
-						&& Integer.valueOf(564).equals(session.getClientStateDebug().get("maxInflight"));
-			} catch (Exception e) {
-				throw new IllegalStateException(e);
-			}
-		}, "connect() must hand Paho the publish window plus the 64-slot QoS 0 reserve - 564 for a window of 500");
-		TahuMqttAsyncClient session = (TahuMqttAsyncClient) get(tahuClient, "client");
+		TahuClient client = newTahuClientOnAClosedPort("test-client-window");
+		client.setMaxInflightMessages(500);
+		client.connect();
 		try {
-			Assert.assertEquals(tahuClient.getMaxInflightMessages(), 500,
-					"The publish window itself is unchanged - the reserve is only on the MQTT client's side");
-		} finally {
-			invoke(get(tahuClient, "connectRunnable"), "stopConnectAttempts");
-			Thread connectThread = (Thread) get(tahuClient, "connectRunnableThread");
-			connectThread.interrupt();
-			connectThread.join(3000);
-
-			// Paho refuses close() while a connect attempt is still unwinding (32110), so give it a moment
 			awaitTrue(() -> {
 				try {
-					session.close(true);
-					return true;
-				} catch (MqttException e) {
+					// Read once per check: between attempts the retry loop clears the field and builds a new session
+					TahuMqttAsyncClient session = (TahuMqttAsyncClient) get(client, "client");
+					Properties state = session != null ? session.getClientStateDebug() : null;
+					return state != null && Integer.valueOf(564).equals(state.get("maxInflight"));
+				} catch (NullPointerException e) {
+					// Paho's getDebug() throws on a client already closed - a session the loop just discarded
 					return false;
+				} catch (Exception e) {
+					throw new IllegalStateException(e);
 				}
-			}, "The refused session must close once its connect attempt has unwound");
+			}, "connect() must hand Paho the publish window plus the 64-slot QoS 0 reserve - 564 for a window of 500");
+			Assert.assertEquals(client.getMaxInflightMessages(), 500,
+					"The publish window itself is unchanged - the reserve is only on the MQTT client's side");
+		} finally {
+			stopRetryingAndClose(client);
 		}
 	}
 
@@ -4225,6 +4228,46 @@ public class TahuClientPublishBufferTest {
 	private static TahuClient newTahuClient(ClientCallback clientCallback) throws Exception {
 		return new TahuClient(new MqttClientId("test-client", false), new MqttServerName("test-server"),
 				new MqttServerUrl("tcp://localhost:1883"), null, null, true, 30, clientCallback, null, false);
+	}
+
+	/*
+	 * For the tests that drive a real connect() and need it refused. The fixture's 1883 is refused only while nothing
+	 * listens there - with an MQTT server on the machine the connect succeeds, the retry loop the tests observe never
+	 * runs, and close() refuses the live session. A port that was free a moment ago is refused either way.
+	 */
+	private TahuClient newTahuClientOnAClosedPort(String clientId) throws Exception {
+		int closedPort;
+		try (ServerSocket probe = new ServerSocket(0)) {
+			closedPort = probe.getLocalPort();
+		}
+		return new TahuClient(new MqttClientId(clientId, false), new MqttServerName("test-server"),
+				new MqttServerUrl("tcp://localhost:" + closedPort), null, null, true, 30, callback, null, false);
+	}
+
+	/*
+	 * Stops a real connect()'s retry loop and closes the Paho client it left. Sessions the loop discarded between
+	 * attempts it closed itself, so only the current one is left. Paho refuses close() with 32110 while a connect
+	 * attempt is still unwinding, which a loaded machine can stretch past the loop's exit, so the close is retried.
+	 */
+	private void stopRetryingAndClose(TahuClient client) throws Exception {
+		invoke(get(client, "connectRunnable"), "stopConnectAttempts");
+		Thread connectThread = (Thread) get(client, "connectRunnableThread");
+		if (connectThread != null) {
+			connectThread.interrupt();
+			connectThread.join(3000);
+		}
+		TahuMqttAsyncClient session = (TahuMqttAsyncClient) get(client, "client");
+		if (session == null) {
+			return;
+		}
+		awaitTrue(() -> {
+			try {
+				session.close(true);
+				return true;
+			} catch (MqttException e) {
+				return false;
+			}
+		}, "The refused session must close once its connect attempt has unwound");
 	}
 
 	/**
