@@ -16,15 +16,29 @@ package org.eclipse.tahu.util;
 import java.math.BigInteger;
 
 import org.eclipse.tahu.message.model.Metric;
+import org.eclipse.tahu.message.model.MetricDataType;
 import org.eclipse.tahu.message.model.PropertySet;
 import org.eclipse.tahu.message.model.SparkplugBPayload;
 import org.eclipse.tahu.message.model.SparkplugMeta;
+import org.eclipse.tahu.message.model.Template;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 public class SparkplugUtil {
 
 	private static Logger logger = LoggerFactory.getLogger(SparkplugUtil.class.getName());
+
+	/**
+	 * Reports if a {@link Metric} is a Template definition, as opposed to a Template instance or any other
+	 * {@link Metric}.
+	 *
+	 * @param metric the {@link Metric} to inspect
+	 * @return true if the {@link Metric} carries a Template definition, otherwise false
+	 */
+	public static boolean isTemplateDefinition(Metric metric) {
+		return metric != null && MetricDataType.Template.equals(metric.getDataType())
+				&& metric.getValue() instanceof Template && ((Template) metric.getValue()).isDefinition();
+	}
 
 	public static int getQualityCode(Metric metric) {
 		PropertySet propertySet = metric.getProperties();
