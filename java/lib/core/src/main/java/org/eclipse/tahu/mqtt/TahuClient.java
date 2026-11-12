@@ -230,6 +230,12 @@ public class TahuClient implements MqttCallbackExtended {
 	 * counted. If the socket stops accepting writes, the sender blocks on the one it holds and the QoS 0 LWT is
 	 * still accepted, but never written; it counts as downgraded, so detachSession() withholds the DISCONNECT and
 	 * the MQTT server publishes the Will.
+	 *
+	 * The reserve is open to all QoS 0, not only the LWT. While the socket stops accepting writes, every QoS 0
+	 * publish is therefore accepted into Paho's queue (ClientState.pendingMessages), which nothing counts or bounds,
+	 * until keepalive drops the connection and the queue is discarded. That was already so whenever the QoS > 0
+	 * window had room; the reserve extends it to a full QoS > 0 window. Keeping the reserve for the LWT alone would
+	 * mean refusing QoS 0 data whenever acknowledgements are merely slow.
 	 */
 	private static final int QOS0_INFLIGHT_HEADROOM = 64;
 
@@ -552,6 +558,12 @@ public class TahuClient implements MqttCallbackExtended {
 		this.maxInFlightMessages = max;
 	}
 
+	/**
+	 * The configured in-flight limit: how many QoS 1 and 2 publishes may be unacknowledged at once. This is the limit
+	 * to display. The MQTT client is given this plus a reserve for QoS 0 (see {@link #getClientStateDebug()}).
+	 *
+	 * @return the configured in-flight limit
+	 */
 	public int getMaxInflightMessages() {
 		return this.maxInFlightMessages;
 	}
@@ -896,6 +908,15 @@ public class TahuClient implements MqttCallbackExtended {
 		}
 	}
 
+	/**
+	 * Paho's internal client state, passed through unchanged for diagnostics.
+	 *
+	 * Its {@code maxInflight} is Paho's in-flight window, which is the configured limit plus a 64-slot reserve for
+	 * QoS 0 - 32832 for the default 32768 - not the configured limit; use {@link #getMaxInflightMessages()} for that.
+	 * Its {@code actualInFlight} can briefly read the configured limit + 1, while one QoS 0 publish is being written.
+	 *
+	 * @return Paho's client state, or null when there is no MQTT client
+	 */
 	public Properties getClientStateDebug() {
 		if (client != null) {
 			return client.getClientStateDebug();
