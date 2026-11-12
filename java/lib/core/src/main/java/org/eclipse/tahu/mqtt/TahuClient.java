@@ -213,6 +213,33 @@ public class TahuClient implements MqttCallbackExtended {
 	private int maxInFlightMessages = 32768;
 
 	/*
+	 * Extra slots in Paho's in-flight window, beyond maxInFlightMessages, that only QoS 0 can ever use.
+	 *
+	 * Paho checks its window on every PUBLISH, whatever the QoS - ClientState.send() throws REASON_CODE_MAX_INFLIGHT
+	 * ("Too many publishes in progress") once its in-flight count reaches the limit, before it looks at the QoS. A
+	 * QoS 0 message counts until it is written to the socket. The semaphore already caps QoS > 0 at
+	 * maxInFlightMessages, so with the two windows the same size, every unacknowledged QoS > 0 message also closed
+	 * the door on QoS 0. That made the QoS 0 LWT fallback in publishLwtWithFallback() fail in exactly the state it
+	 * exists for - an exhausted window - and refused ordinary QoS 0 data whenever QoS > 0 traffic on the same client
+	 * was backed up.
+	 *
+	 * Paho counts a message from when its single sender thread takes it to write (ClientState.get()), and a QoS 0
+	 * message only until that write completes (notifySent()). One sender thread means at most one QoS 0 is counted at
+	 * a time, so the count peaks at maxInFlightMessages + 1 and the reserve is headroom for send()'s check, not
+	 * capacity: the next QoS 0 must not be refused while the current one is being written. Queued messages are not
+	 * counted. If the socket stops accepting writes, the sender blocks on the one it holds and the QoS 0 LWT is
+	 * still accepted, but never written; it counts as downgraded, so detachSession() withholds the DISCONNECT and
+	 * the MQTT server publishes the Will.
+	 *
+	 * The reserve is open to all QoS 0, not only the LWT. While the socket stops accepting writes, every QoS 0
+	 * publish is therefore accepted into Paho's queue (ClientState.pendingMessages), which nothing counts or bounds,
+	 * until keepalive drops the connection and the queue is discarded. That was already so whenever the QoS > 0
+	 * window had room; the reserve extends it to a full QoS > 0 window. Keeping the reserve for the LWT alone would
+	 * mean refusing QoS 0 data whenever acknowledgements are merely slow.
+	 */
+	private static final int QOS0_INFLIGHT_HEADROOM = 64;
+
+	/*
 	 * The maximum number of topics per individual subscribe message.
 	 */
 	private int maxTopicsPerSubscribe = 256;
@@ -350,8 +377,12 @@ public class TahuClient implements MqttCallbackExtended {
 
 	/*
 	 * Set by publishLwt() so disconnect() can tell whether the death certificate actually reached the MQTT client.
-	 * False means every attempt failed, including the QoS 0 fallback - and the only remaining way to get one
-	 * published is to let the MQTT server publish the Will, which means NOT sending a DISCONNECT packet.
+	 * False means no acknowledged LWT was published - every attempt failed, or it went out downgraded to QoS 0 - and
+	 * the only remaining way to get one published is to let the MQTT server publish the Will, which means NOT sending
+	 * a DISCONNECT packet. Covers the latest attempt in the current session, whether the disconnect made it or the
+	 * caller did beforehand; reset to true when the session is detached. A failed explicit LWT is not undone by a
+	 * later BIRTH in the same session, so that session closes without a DISCONNECT and the Will fires - harmless, as
+	 * a death certificate is accurate at the moment of disconnect.
 	 */
 	private volatile boolean lwtPublishSucceeded = true;
 
@@ -527,8 +558,22 @@ public class TahuClient implements MqttCallbackExtended {
 		this.maxInFlightMessages = max;
 	}
 
+	/**
+	 * The configured in-flight limit: how many QoS 1 and 2 publishes may be unacknowledged at once. This is the limit
+	 * to display. The MQTT client is given this plus a reserve for QoS 0 (see {@link #getClientStateDebug()}).
+	 *
+	 * @return the configured in-flight limit
+	 */
 	public int getMaxInflightMessages() {
 		return this.maxInFlightMessages;
+	}
+
+	/*
+	 * The window handed to Paho: the publish window plus QOS0_INFLIGHT_HEADROOM, saturating rather than overflowing
+	 * for a very large configured window.
+	 */
+	private int getPahoMaxInflight() {
+		return (int) Math.min(Integer.MAX_VALUE, (long) getMaxInflightMessages() + QOS0_INFLIGHT_HEADROOM);
 	}
 
 	public void setPublishBufferCapacity(int publishBufferCapacity) {
@@ -863,6 +908,15 @@ public class TahuClient implements MqttCallbackExtended {
 		}
 	}
 
+	/**
+	 * Paho's internal client state, passed through unchanged for diagnostics.
+	 *
+	 * Its {@code maxInflight} is Paho's in-flight window, which is the configured limit plus a 64-slot reserve for
+	 * QoS 0 - 32832 for the default 32768 - not the configured limit; use {@link #getMaxInflightMessages()} for that.
+	 * Its {@code actualInFlight} can briefly read the configured limit + 1, while one QoS 0 publish is being written.
+	 *
+	 * @return Paho's client state, or null when there is no MQTT client
+	 */
 	public Properties getClientStateDebug() {
 		if (client != null) {
 			return client.getClientStateDebug();
@@ -2346,20 +2400,28 @@ public class TahuClient implements MqttCallbackExtended {
 				} catch (Exception e) {
 					logger.error("{}: Failed to publish the LWT during disconnect - continuing", getClientId(), e);
 				}
+			}
 
-				/*
-				 * Last resort. No acknowledged death certificate was published: either every attempt failed, or it
-				 * went out downgraded to QoS 0 and carries no guarantee. A clean DISCONNECT would tell the MQTT
-				 * server we left gracefully and suppress the Will, leaving subscribers with nothing better than that
-				 * unacknowledged publish - so drop the connection instead and let the server publish the Will it
-				 * already holds from connect(). That Will is QoS 1 and retained, so it is strictly the stronger of
-				 * the two, and an identical retained payload arriving twice is harmless.
-				 */
-				if (sendDisconnectPacket && !lwtPublishSucceeded) {
-					logger.warn("{}: Could not publish the LWT on {} by any route - closing without a "
-							+ "DISCONNECT so the MQTT server publishes the Will instead", getClientId(), lwtTopic);
-					sendDisconnectPacket = false;
-				}
+			/*
+			 * Last resort. No acknowledged death certificate was published: either every attempt failed, or it went
+			 * out downgraded to QoS 0 and carries no guarantee. A clean DISCONNECT would tell the MQTT server we left
+			 * gracefully and suppress the Will, leaving subscribers with nothing better than that unacknowledged
+			 * publish - so drop the connection instead and let the server publish the Will it already holds from
+			 * connect(). That Will is QoS 1 and retained, so it is strictly the stronger of the two, and an identical
+			 * retained payload arriving twice is harmless.
+			 *
+			 * Deliberately outside 'if (publishLwt)'. A caller can publish the death certificate itself through
+			 * publishLwt() - typically before unsubscribing, so nothing arrives after it - and then disconnect with
+			 * publishLwt=false so it is not sent twice. lwtPublishSucceeded still holds the verdict on that earlier
+			 * attempt, and it is no less final for having been made by the caller: inside the block, a failed
+			 * explicit LWT was followed by a clean DISCONNECT, and subscribers got neither the certificate nor the
+			 * Will. With no attempt this session the flag is true, so a disconnect that never published an LWT
+			 * still sends its DISCONNECT.
+			 */
+			if (sendDisconnectPacket && !lwtPublishSucceeded) {
+				logger.warn("{}: No acknowledged LWT was published on {} - closing without a DISCONNECT so the MQTT "
+						+ "server publishes the Will instead", getClientId(), lwtTopic);
+				sendDisconnectPacket = false;
 			}
 
 			/*
@@ -2388,6 +2450,11 @@ public class TahuClient implements MqttCallbackExtended {
 			 */
 			state.setInProgress(false);
 			lwtDeliveryToken = null;
+			/*
+			 * The LWT verdict belongs to the session it was reached in. Left set, a failure from this session would
+			 * withhold the DISCONNECT on a later session's disconnect that published no LWT at all.
+			 */
+			lwtPublishSucceeded = true;
 			// Reset re-subscribed flag
 			resubscribed = false;
 		}
@@ -2654,8 +2721,9 @@ public class TahuClient implements MqttCallbackExtended {
 						connectOptions.setWill(lwtTopic, lwtPayload, MqttOperatorDefs.QOS1, lwtRetain);
 					}
 				}
-				logger.trace("Setting max in-flight messages to {}", getMaxInflightMessages());
-				connectOptions.setMaxInflight(getMaxInflightMessages());
+				logger.trace("Setting max in-flight messages to {} ({} in the MQTT client, the rest reserved for QoS 0)",
+						getMaxInflightMessages(), getPahoMaxInflight());
+				connectOptions.setMaxInflight(getPahoMaxInflight());
 				synchronized (messageLock) {
 					semaphore = new Semaphore(getMaxInflightMessages(), true);
 					lockedMessageSet = ConcurrentHashMap.newKeySet();
@@ -3785,7 +3853,12 @@ public class TahuClient implements MqttCallbackExtended {
 					}
 				}
 
-				if (lwtPublished && waitForLwt) {
+				/*
+				 * The same gate as detachSession(): only an acknowledgeable certificate is worth waiting for. A QoS 0
+				 * token - downgraded, or configured that way - completes only on Paho's callback thread, and this wait
+				 * holds clientLock, so it could run for keepAlive seconds on a token that carries no guarantee anyway.
+				 */
+				if (lwtPublished && waitForLwt && lwtPublishSucceeded && lwtQoS > MqttOperatorDefs.QOS0) {
 					lwtDeliveryComplete = isLwtDeliveryComplete();
 					logger.trace("{}: Completed LWT Delivery? {}", getClientId(), lwtDeliveryComplete);
 				} else {

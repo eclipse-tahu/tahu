@@ -20,9 +20,11 @@ import java.lang.management.ThreadMXBean;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.net.ServerSocket;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Properties;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
@@ -37,6 +39,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
+import java.util.function.IntSupplier;
 
 import org.eclipse.paho.client.mqttv3.IMqttActionListener;
 import org.eclipse.paho.client.mqttv3.IMqttAsyncClient;
@@ -924,24 +927,32 @@ public class TahuClientPublishBufferTest {
 	 * is bound to that client, and a session the retry loop gives up on does not keep its drain.
 	 *
 	 * The other session tests build the callback and bind the drain by hand, so on their own they would stay green if
-	 * connect() stopped installing either. The connect reaches a real socket, refused since nothing is listening, so
-	 * the retry loop is still running when the assertions are made.
+	 * connect() stopped installing either. The connect reaches a real socket, refused since nothing is listening on
+	 * it, so the retry loop is still running when the assertions are made.
 	 */
 	@Test(
 			timeOut = 15000)
 	public void connectWiresTheSessionCallbackAndDrainToTheSessionItBuilds() throws Exception {
-		tahuClient.connect();
+		TahuClient client = newTahuClientOnAClosedPort("test-client-wiring");
+		client.connect();
+
+		// Kept from the check itself: between attempts the retry loop clears the field and builds a new session
+		AtomicReference<TahuMqttAsyncClient> wired = new AtomicReference<>();
 		awaitTrue(() -> {
 			try {
-				Object session = get(tahuClient, "client");
-				return session != null && get(tahuClient, "publishBufferDrainSession") == session
-						&& get(tahuClient, "retryLoopSession") == session;
+				TahuMqttAsyncClient session = (TahuMqttAsyncClient) get(client, "client");
+				if (session != null && get(client, "publishBufferDrainSession") == session
+						&& get(client, "retryLoopSession") == session) {
+					wired.set(session);
+					return true;
+				}
+				return false;
 			} catch (Exception e) {
 				throw new IllegalStateException(e);
 			}
 		}, "connect() must build a session, bind the drain to it and retry it");
-		TahuMqttAsyncClient session = (TahuMqttAsyncClient) get(tahuClient, "client");
-		Thread drainThread = (Thread) get(tahuClient, "publishBufferDrainThread");
+		TahuMqttAsyncClient session = wired.get();
+		Thread drainThread = (Thread) get(client, "publishBufferDrainThread");
 		try {
 			Object installed = get(session, "mqttCallback");
 			Assert.assertEquals(installed.getClass().getName(), TahuClient.class.getName() + "$SessionCallback",
@@ -952,13 +963,13 @@ public class TahuClientPublishBufferTest {
 			Assert.assertTrue(drainThread.isAlive(), "A session the loop is still retrying must keep its drain");
 
 			// The loop gives up: the drain goes with it
-			invoke(get(tahuClient, "connectRunnable"), "stopConnectAttempts");
-			((Thread) get(tahuClient, "connectRunnableThread")).interrupt();
+			invoke(get(client, "connectRunnable"), "stopConnectAttempts");
+			((Thread) get(client, "connectRunnableThread")).interrupt();
 			drainThread.join(3000);
 			Assert.assertFalse(drainThread.isAlive(), "A session the retry loop gave up on must not keep its drain");
-			Assert.assertNull(get(tahuClient, "retryLoopSession"), "The loop must clear its session as it exits");
+			Assert.assertNull(get(client, "retryLoopSession"), "The loop must clear its session as it exits");
 		} finally {
-			session.close(true);
+			stopRetryingAndClose(client);
 		}
 	}
 
@@ -2912,6 +2923,252 @@ public class TahuClientPublishBufferTest {
 	}
 
 	/**
+	 * Paho refuses every PUBLISH, QoS 0 included, once its in-flight count reaches the window it was given. With
+	 * that window the same size as the publish window, a full set of unacknowledged QoS 1 messages shut out QoS 0
+	 * too - the QoS 0 LWT fallback could never succeed in the state it exists for. With every permit taken, QoS 0
+	 * must still go out, and the window must not overflow for a very large publish window.
+	 */
+	@Test(
+			timeOut = TIMEOUT_MS)
+	public void theMqttClientWindowLeavesRoomForQos0BeyondThePublishWindow() throws Exception {
+		// Every permit held by an unacknowledged QoS 1 message
+		wire(0, 8);
+
+		tahuClient.publish("topic/qos0", "0".getBytes(), 0, false);
+
+		Assert.assertEquals(fakeClient.publishedTopics(), List.of("topic/qos0"),
+				"A full publish window must not shut out QoS 0 - the MQTT client's window needs room beyond it");
+
+		tahuClient.setMaxInflightMessages(Integer.MAX_VALUE);
+		Assert.assertEquals(invoke(tahuClient, "getPahoMaxInflight"), Integer.MAX_VALUE,
+				"The reserve must saturate, not overflow into a negative window");
+	}
+
+	/**
+	 * The window the tests above run under is the one connect() hands Paho - checked on the Paho client itself.
+	 *
+	 * wire() takes its window from getPahoMaxInflight() directly, so on their own the window tests would stay green
+	 * if connect() went back to handing Paho the bare publish window, which is how the QoS 0 fallback first shipped
+	 * broken. Paho stores the window in ClientComms.connect() before the socket is opened, so a refused connect is
+	 * enough. getClientStateDebug() is also what applications read it through.
+	 *
+	 * The client targets a closed port rather than the fixture's 1883 - see newTahuClientOnAClosedPort().
+	 */
+	@Test(
+			timeOut = 15000)
+	public void connectHandsTheMqttClientTheWindowWithTheQos0Reserve() throws Exception {
+		TahuClient client = newTahuClientOnAClosedPort("test-client-window");
+		client.setMaxInflightMessages(500);
+		client.connect();
+		try {
+			awaitTrue(() -> {
+				try {
+					// Read once per check: between attempts the retry loop clears the field and builds a new session
+					TahuMqttAsyncClient session = (TahuMqttAsyncClient) get(client, "client");
+					Properties state = session != null ? session.getClientStateDebug() : null;
+					return state != null && Integer.valueOf(564).equals(state.get("maxInflight"));
+				} catch (NullPointerException e) {
+					// Paho's getDebug() throws on a client already closed - a session the loop just discarded
+					return false;
+				} catch (Exception e) {
+					throw new IllegalStateException(e);
+				}
+			}, "connect() must hand Paho the publish window plus the 64-slot QoS 0 reserve - 564 for a window of 500");
+			Assert.assertEquals(client.getMaxInflightMessages(), 500,
+					"The publish window itself is unchanged - the reserve is only on the MQTT client's side");
+		} finally {
+			stopRetryingAndClose(client);
+		}
+	}
+
+	/**
+	 * The size of the reserve. Paho itself counts at most one QoS 0 at a time, so any reserve above one would do;
+	 * this pins the 64 under a stricter fake where every accepted QoS 0 keeps a slot (holdQos0Writes()). With 63 of
+	 * them held, the QoS 0 LWT fallback must still go out. A smaller reserve passes every other test, because
+	 * elsewhere QoS 0 is released at once.
+	 */
+	@Test(
+			timeOut = TIMEOUT_MS)
+	public void theQos0ReserveStillHoldsTheDeathCertificateBehindABurstOfUnwrittenQos0() throws Exception {
+		wire(0, 8);
+		configureLwt(1);
+		fakeClient.holdQos0Writes();
+		for (int i = 0; i < 63; i++) {
+			tahuClient.publish("topic/qos0-" + i, "0".getBytes(), 0, false);
+		}
+
+		tahuClient.disconnect(0, 1, true, true, false);
+
+		Assert.assertTrue(fakeClient.publishedTopics().contains(LWT_TOPIC),
+				"63 unwritten QoS 0 messages must leave a slot for the QoS 0 death certificate");
+	}
+
+	/**
+	 * Under the same stricter fake, with the reserve full the QoS 0 fallback is refused too, and the disconnect must
+	 * fall back to the Will by closing without a DISCONNECT. Not a state Paho reaches - it covers the LWT failing by
+	 * every route, whatever the cause.
+	 */
+	@Test(
+			timeOut = TIMEOUT_MS)
+	public void aReserveFilledByUnwrittenQos0LeavesTheDeathCertificateToTheWill() throws Exception {
+		wire(0, 8);
+		configureLwt(1);
+		fakeClient.holdQos0Writes();
+		for (int i = 0; i < 64; i++) {
+			tahuClient.publish("topic/qos0-" + i, "0".getBytes(), 0, false);
+		}
+
+		tahuClient.disconnect(0, 1, true, true, false);
+
+		Assert.assertFalse(fakeClient.publishedTopics().contains(LWT_TOPIC),
+				"Precondition: with the reserve full, Paho must refuse the QoS 0 death certificate too");
+		Assert.assertTrue(fakeClient.disconnectForciblyCalled, "The disconnect must still complete");
+		Assert.assertFalse(fakeClient.disconnectSent,
+				"No death certificate went out by any route, so the DISCONNECT must be withheld and the Will left "
+						+ "to fire");
+	}
+
+	/**
+	 * An explicit publishLwt(true) must not wait on a QoS 0 death certificate either - the same gate as
+	 * aDeathCertificateDowngradedToQos0IsNotWaitedOn, on the caller's path. With the reserve, the QoS 0 fallback now
+	 * succeeds, and the wait it reached holds clientLock for keepAlive seconds on a token only the callback thread
+	 * can complete.
+	 */
+	@Test(
+			timeOut = TIMEOUT_MS * 4)
+	public void anExplicitDeathCertificateDowngradedToQos0IsNotWaitedOn() throws Exception {
+		wire(0, 8);
+		configureLwt(1);
+		fakeClient.shutdownAckThread();
+
+		assertExplicitLwtReturnsWithinBudget();
+
+		Assert.assertTrue((Boolean) get(tahuClient, "lwtDowngradedToQos0"),
+				"Precondition: the certificate must have been downgraded to QoS 0, or this tests nothing");
+	}
+
+	/** ...and neither on one configured at QoS 0, which never sets the downgrade flag. */
+	@Test(
+			timeOut = TIMEOUT_MS * 4)
+	public void anExplicitDeathCertificateConfiguredAtQos0IsNotWaitedOn() throws Exception {
+		wire(8, 8);
+		configureLwt(0);
+		fakeClient.shutdownAckThread();
+
+		assertExplicitLwtReturnsWithinBudget();
+
+		Assert.assertFalse((Boolean) get(tahuClient, "lwtDowngradedToQos0"),
+				"Precondition: a QoS 0 certificate is not a downgrade, so the flag alone cannot gate the wait");
+	}
+
+	private void assertExplicitLwtReturnsWithinBudget() throws Exception {
+		final CountDownLatch returned = new CountDownLatch(1);
+		Thread publisher = new Thread(() -> {
+			try {
+				tahuClient.publishLwt(true);
+			} catch (Exception e) {
+				// Reported by the assertions below
+			} finally {
+				returned.countDown();
+			}
+		}, "explicit-lwt");
+		publisher.setDaemon(true);
+		publisher.start();
+
+		boolean finished = returned.await(LWT_CONFIRMATION_BUDGET_MS, TimeUnit.MILLISECONDS);
+
+		// Unwedged before the assertions, so a failing run does not leave the rest of the budget behind it
+		publisher.interrupt();
+		publisher.join(TIMEOUT_MS);
+
+		Assert.assertTrue(fakeClient.publishedTopics().contains(LWT_TOPIC),
+				"Precondition: the death certificate must have been published, or there is nothing to wait on");
+		Assert.assertTrue(finished,
+				"publishLwt(true) did not return within " + LWT_CONFIRMATION_BUDGET_MS + "ms on a QoS 0 death "
+						+ "certificate - it waited, holding clientLock, on a token only the stalled callback thread "
+						+ "can complete");
+	}
+
+	/**
+	 * A caller may publish the death certificate itself, before unsubscribing, and then disconnect with
+	 * publishLwt=false so it is not sent twice. If that explicit LWT could not be published, the disconnect must
+	 * still withhold the DISCONNECT so the Will fires. The escalation used to sit inside 'if (publishLwt)', so this
+	 * call shape sent a clean DISCONNECT and subscribers got neither the certificate nor the Will.
+	 */
+	@Test(
+			timeOut = TIMEOUT_MS)
+	public void aFailedExplicitLwtWithholdsTheDisconnectWhenTheDisconnectPublishesNoLwt() throws Exception {
+		wire(8, 8);
+		configureLwt(1);
+		fakeClient.failNextPublishes(Integer.MAX_VALUE);
+
+		// Rethrown when every route fails, which is how the caller hears of it - and why it cannot be relied on
+		Assert.expectThrows(TahuException.class, () -> tahuClient.publishLwt(false));
+		tahuClient.disconnect(0, 1, true, false, false);
+
+		Assert.assertTrue(fakeClient.disconnectForciblyCalled, "The disconnect must still complete");
+		Assert.assertFalse(fakeClient.disconnectSent,
+				"The explicit LWT failed, so the DISCONNECT must be withheld and the Will left to fire");
+	}
+
+	/**
+	 * The same call shape with the window exhausted, as in the field: the explicit LWT goes out downgraded to QoS 0,
+	 * which carries no guarantee, so the following publishLwt=false disconnect must still leave the Will to fire.
+	 */
+	@Test(
+			timeOut = TIMEOUT_MS)
+	public void aDowngradedExplicitLwtWithholdsTheDisconnectWhenTheDisconnectPublishesNoLwt() throws Exception {
+		wire(0, 8);
+		configureLwt(1);
+
+		tahuClient.publishLwt(false);
+		tahuClient.disconnect(0, 1, true, false, false);
+
+		Assert.assertEquals(fakeClient.publishedTopics(), List.of(LWT_TOPIC),
+				"The explicit LWT must go out at QoS 0, and the publishLwt=false disconnect must not send another");
+		Assert.assertFalse(fakeClient.disconnectSent,
+				"A downgraded explicit LWT is not acknowledged, so the DISCONNECT must be withheld");
+	}
+
+	/** The converse: an explicit LWT that went out at its configured QoS leaves the clean DISCONNECT standing. */
+	@Test(
+			timeOut = TIMEOUT_MS)
+	public void anAcknowledgedExplicitLwtStillSendsTheDisconnectWhenTheDisconnectPublishesNoLwt() throws Exception {
+		wire(8, 8);
+		configureLwt(1);
+
+		tahuClient.publishLwt(false);
+		tahuClient.disconnect(0, 1, true, false, false);
+
+		Assert.assertEquals(fakeClient.publishedTopics(), List.of(LWT_TOPIC));
+		Assert.assertTrue(fakeClient.disconnectSent, "An acknowledged explicit LWT needs no Will behind it");
+	}
+
+	/**
+	 * The verdict belongs to the session it was reached in. A failed LWT in one session must not withhold the
+	 * DISCONNECT of a later session's disconnect that published no LWT at all.
+	 */
+	@Test(
+			timeOut = TIMEOUT_MS)
+	public void aFailedLwtDoesNotWithholdTheNextSessionsDisconnect() throws Exception {
+		wire(8, 8);
+		configureLwt(1);
+		fakeClient.failNextPublishes(Integer.MAX_VALUE);
+		Assert.expectThrows(TahuException.class, () -> tahuClient.publishLwt(false));
+		tahuClient.disconnect(0, 1, true, false, false);
+		Assert.assertFalse(fakeClient.disconnectSent, "Precondition: the first session withheld its DISCONNECT");
+
+		// The next session: live again, and nothing fails
+		fakeClient.failNextPublishes(0);
+		fakeClient.markConnected();
+		wire(8, 8);
+		tahuClient.disconnect(0, 1, true, false, false);
+
+		Assert.assertTrue(fakeClient.disconnectSent,
+				"A disconnect that published no LWT this session must send its DISCONNECT");
+	}
+
+	/**
 	 * Backpressure that clears must not cost the session.
 	 *
 	 * An exhausted window or a queued message is the ordinary condition the publish buffer exists to absorb, and it
@@ -3822,6 +4079,16 @@ public class TahuClientPublishBufferTest {
 		set(tahuClient, "lockedMessageSet", ConcurrentHashMap.newKeySet());
 		set(tahuClient, "maxInFlightMessages", maxInflight);
 
+		// The window connect() hands Paho, with Paho enforcing it - so QoS 0 is refused here exactly when it would be
+		// in production. Read through the fields each time, since tests replace the semaphore and the limit.
+		fakeClient.modelPahoWindow((Integer) invoke(tahuClient, "getPahoMaxInflight"), () -> {
+			try {
+				return (Integer) get(tahuClient, "maxInFlightMessages") - semaphore().availablePermits();
+			} catch (Exception e) {
+				throw new IllegalStateException(e);
+			}
+		});
+
 		// A live session with no subscriptions outstanding, which is what connectComplete() leaves without any
 		set(tahuClient, "subscriptionsConfirmedGeneration", ((AtomicLong) get(tahuClient, "connectGeneration")).get());
 		startDrain();
@@ -3964,6 +4231,46 @@ public class TahuClientPublishBufferTest {
 				new MqttServerUrl("tcp://localhost:1883"), null, null, true, 30, clientCallback, null, false);
 	}
 
+	/*
+	 * For the tests that drive a real connect() and need it refused. The fixture's 1883 is refused only while nothing
+	 * listens there - with an MQTT server on the machine the connect succeeds, the retry loop the tests observe never
+	 * runs, and close() refuses the live session. A port that was free a moment ago is refused either way.
+	 */
+	private TahuClient newTahuClientOnAClosedPort(String clientId) throws Exception {
+		int closedPort;
+		try (ServerSocket probe = new ServerSocket(0)) {
+			closedPort = probe.getLocalPort();
+		}
+		return new TahuClient(new MqttClientId(clientId, false), new MqttServerName("test-server"),
+				new MqttServerUrl("tcp://localhost:" + closedPort), null, null, true, 30, callback, null, false);
+	}
+
+	/*
+	 * Stops a real connect()'s retry loop and closes the Paho client it left. Sessions the loop discarded between
+	 * attempts it closed itself, so only the current one is left. Paho refuses close() with 32110 while a connect
+	 * attempt is still unwinding, which a loaded machine can stretch past the loop's exit, so the close is retried.
+	 */
+	private void stopRetryingAndClose(TahuClient client) throws Exception {
+		invoke(get(client, "connectRunnable"), "stopConnectAttempts");
+		Thread connectThread = (Thread) get(client, "connectRunnableThread");
+		if (connectThread != null) {
+			connectThread.interrupt();
+			connectThread.join(3000);
+		}
+		TahuMqttAsyncClient session = (TahuMqttAsyncClient) get(client, "client");
+		if (session == null) {
+			return;
+		}
+		awaitTrue(() -> {
+			try {
+				session.close(true);
+				return true;
+			} catch (MqttException e) {
+				return false;
+			}
+		}, "The refused session must close once its connect attempt has unwound");
+	}
+
 	/**
 	 * Polls for a condition the BIRTH recovery worker satisfies asynchronously.
 	 *
@@ -4035,6 +4342,10 @@ public class TahuClientPublishBufferTest {
 		private final List<IMqttActionListener> subscribeListeners = new ArrayList<>();
 		private volatile int failSubscribeRequestAt = -1;
 		private volatile int[] grantOnSyncSubscribe;
+		private volatile int pahoMaxInflight = Integer.MAX_VALUE;
+		private volatile IntSupplier unacknowledgedInFlight = () -> 0;
+		private volatile boolean holdQos0Writes;
+		private final AtomicInteger unwrittenQos0 = new AtomicInteger();
 
 		private FakeMqttClient() throws MqttException {
 			super("tcp://localhost:1883", "test-client", null);
@@ -4146,6 +4457,29 @@ public class TahuClientPublishBufferTest {
 			failuresRemaining.set(count);
 		}
 
+		/*
+		 * Models Paho's own in-flight check, which this fake used to skip - and skipping it is how a QoS 0 LWT
+		 * fallback that could never work in production passed every test here. ClientState.send() refuses any
+		 * PUBLISH, whatever its QoS, with REASON_CODE_MAX_INFLIGHT once its in-flight count reaches the window it was
+		 * given. inFlight supplies the unacknowledged QoS > 0 count, including a message whose permit has been taken
+		 * but which has not reached publish() yet - so publish() discounts its own. That last part is conservative:
+		 * Paho counts a QoS > 0 message only once its sender thread takes it to write, not while it is still pending.
+		 */
+		private void modelPahoWindow(int maxInflight, IntSupplier inFlight) {
+			this.unacknowledgedInFlight = inFlight;
+			this.pahoMaxInflight = maxInflight;
+		}
+
+		/*
+		 * QoS 0 counts against Paho's window too, from the moment its single sender thread takes it until
+		 * notifySent() after the write - so in Paho at most one QoS 0 is counted at a time. The fake normally counts
+		 * none. Once set, every accepted QoS 0 publish keeps a slot: a stricter case than Paho can reach, used to pin
+		 * the size of the reserve rather than to model a real socket.
+		 */
+		private void holdQos0Writes() {
+			holdQos0Writes = true;
+		}
+
 		private synchronized List<String> publishedTopics() {
 			return new ArrayList<>(published);
 		}
@@ -4204,6 +4538,14 @@ public class TahuClientPublishBufferTest {
 				failuresRemaining.decrementAndGet();
 				// 32202 == REASON_CODE_MAX_INFLIGHT, the realistic transient failure
 				throw new MqttException(32202);
+			}
+			// A QoS > 0 caller took its permit before calling, so its own message is already in the count
+			int inFlightBeforeThis = unacknowledgedInFlight.getAsInt() - (qos > 0 ? 1 : 0) + unwrittenQos0.get();
+			if (inFlightBeforeThis >= pahoMaxInflight) {
+				throw new MqttException(MqttException.REASON_CODE_MAX_INFLIGHT);
+			}
+			if (qos == 0 && holdQos0Writes) {
+				unwrittenQos0.incrementAndGet();
 			}
 			synchronized (this) {
 				published.add(topic);
