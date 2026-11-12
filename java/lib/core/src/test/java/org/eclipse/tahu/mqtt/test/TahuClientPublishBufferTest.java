@@ -2982,10 +2982,10 @@ public class TahuClientPublishBufferTest {
 	}
 
 	/**
-	 * The size of the reserve: with the socket stalled, QoS 0 keeps its slot until written, so a burst of QoS 0
-	 * data shares the reserve with the death certificate. Up to 63 unwritten QoS 0 messages must still leave room
-	 * for the QoS 0 LWT fallback. A smaller reserve passes every other test, because elsewhere QoS 0 is written at
-	 * once.
+	 * The size of the reserve. Paho itself counts at most one QoS 0 at a time, so any reserve above one would do;
+	 * this pins the 64 under a stricter fake where every accepted QoS 0 keeps a slot (holdQos0Writes()). With 63 of
+	 * them held, the QoS 0 LWT fallback must still go out. A smaller reserve passes every other test, because
+	 * elsewhere QoS 0 is released at once.
 	 */
 	@Test(
 			timeOut = TIMEOUT_MS)
@@ -3004,8 +3004,9 @@ public class TahuClientPublishBufferTest {
 	}
 
 	/**
-	 * Past the reserve, nothing helps: the QoS 0 fallback is refused too, and the disconnect must fall back to the
-	 * Will by closing without a DISCONNECT.
+	 * Under the same stricter fake, with the reserve full the QoS 0 fallback is refused too, and the disconnect must
+	 * fall back to the Will by closing without a DISCONNECT. Not a state Paho reaches - it covers the LWT failing by
+	 * every route, whatever the cause.
 	 */
 	@Test(
 			timeOut = TIMEOUT_MS)
@@ -4470,9 +4471,10 @@ public class TahuClientPublishBufferTest {
 		}
 
 		/*
-		 * QoS 0 counts against Paho's window too, from the moment its sender thread takes it until notifySent() after
-		 * the write. Normally that is instant, so the fake does not count it - but with the socket stalled QoS 0 sits
-		 * in the window. Once set, each accepted QoS 0 publish keeps its slot, as an unwritable socket would leave it.
+		 * QoS 0 counts against Paho's window too, from the moment its single sender thread takes it until
+		 * notifySent() after the write - so in Paho at most one QoS 0 is counted at a time. The fake normally counts
+		 * none. Once set, every accepted QoS 0 publish keeps a slot: a stricter case than Paho can reach, used to pin
+		 * the size of the reserve rather than to model a real socket.
 		 */
 		private void holdQos0Writes() {
 			holdQos0Writes = true;

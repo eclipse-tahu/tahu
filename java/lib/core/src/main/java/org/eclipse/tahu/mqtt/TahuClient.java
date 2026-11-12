@@ -223,9 +223,13 @@ public class TahuClient implements MqttCallbackExtended {
 	 * exists for - an exhausted window - and refused ordinary QoS 0 data whenever QoS > 0 traffic on the same client
 	 * was backed up.
 	 *
-	 * QoS 0 holds a slot only until the write, so a small reserve covers it while the socket is writable. If the
-	 * socket is not writable, no reserve helps; the LWT then fails by every route and detachSession() withholds the
-	 * DISCONNECT so the MQTT server publishes the Will.
+	 * Paho counts a message from when its single sender thread takes it to write (ClientState.get()), and a QoS 0
+	 * message only until that write completes (notifySent()). One sender thread means at most one QoS 0 is counted at
+	 * a time, so the count peaks at maxInFlightMessages + 1 and the reserve is headroom for send()'s check, not
+	 * capacity: the next QoS 0 must not be refused while the current one is being written. Queued messages are not
+	 * counted. If the socket stops accepting writes, the sender blocks on the one it holds and the QoS 0 LWT is
+	 * still accepted, but never written; it counts as downgraded, so detachSession() withholds the DISCONNECT and
+	 * the MQTT server publishes the Will.
 	 */
 	private static final int QOS0_INFLIGHT_HEADROOM = 64;
 
