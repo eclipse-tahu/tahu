@@ -21,10 +21,12 @@ public class MetricDataTypeMap {
 
 	private final Map<String, MetricDataType> nameDataTypeMap;
 	private final Map<Long, MetricDataType> aliasDataTypeMap;
+	private final Map<Long, String> aliasNameMap;
 
 	public MetricDataTypeMap() {
 		nameDataTypeMap = new ConcurrentHashMap<>();
 		aliasDataTypeMap = new ConcurrentHashMap<>();
+		aliasNameMap = new ConcurrentHashMap<>();
 	}
 
 	public void addMetricDataType(String metricName, MetricDataType metricDataType) {
@@ -33,6 +35,14 @@ public class MetricDataTypeMap {
 
 	public void addMetricDataType(Long alias, MetricDataType metricDataType) {
 		aliasDataTypeMap.put(alias, metricDataType);
+	}
+
+	public void addMetricName(Long alias, String metricName) {
+		aliasNameMap.put(alias, metricName);
+	}
+
+	public String getMetricName(Long alias) {
+		return aliasNameMap.get(alias);
 	}
 
 	public MetricDataType getMetricDataType(String metricName) {
@@ -53,6 +63,7 @@ public class MetricDataTypeMap {
 
 	public void clear() {
 		nameDataTypeMap.clear();
+		aliasNameMap.clear();
 	}
 
 	@Override
