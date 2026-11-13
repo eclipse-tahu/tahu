@@ -191,13 +191,14 @@ def initTemplateMetric(payload, name, alias, templateRef):
 # Helper method for adding metrics to a container which can be a
 # payload or a template
 ######################################################################
-def addMetric(container, name, alias, type, value, timestamp=int(round(time.time() * 1000))):
+def addMetric(container, name, alias, type, value, timestamp=None):
     metric = container.metrics.add()
     if name is not None:
         metric.name = name
     if alias is not None:
         metric.alias = alias
-    metric.timestamp = timestamp
+    # Evaluate the default at each call, not once when this module is imported.
+    metric.timestamp = int(round(time.time() * 1000)) if timestamp is None else timestamp
 
     # print( "Type: " + str(type))
 
